@@ -5,7 +5,9 @@ from nicegui import ui
 from app.config import load_settings
 from app.db import init_db
 from app.ui.components import empty_state
+from app.ui.dashboard import render_dashboard_page
 from app.ui.layout import app_frame
+from app.ui.servers import render_servers_page
 
 
 settings = load_settings()
@@ -13,7 +15,7 @@ settings = load_settings()
 
 @ui.page("/")
 def home_page() -> None:
-    app_frame("Home", lambda: empty_state("Server status dashboard will appear here."))
+    app_frame("Home", render_dashboard_page)
 
 
 @ui.page("/projects")
@@ -28,7 +30,7 @@ def runs_page() -> None:
 
 @ui.page("/servers")
 def servers_page() -> None:
-    app_frame("Servers", lambda: empty_state("Servers will appear here."))
+    app_frame("Servers", render_servers_page)
 
 
 @ui.page("/settings")

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
+
+from app.config import Settings
+from app.db import create_engine_for_settings, init_db, session_scope
+from app.models import Server
 
 
 class FakeElement:
@@ -92,21 +97,15 @@ def test_components_render_empty_state_and_error_label(monkeypatch):
     assert ("classes:label", ("text-negative",), {}) in fake_ui.calls
 
 
-def test_placeholder_pages_use_exact_plan_text(monkeypatch):
+def test_pages_use_app_frame_and_configured_content(monkeypatch):
     import app.main as main_module
 
     captured = []
 
     def fake_app_frame(title, content):
-        content()
-        message = captured.pop()
-        captured.append((title, message))
-
-    def fake_empty_state(message):
-        captured.append(message)
+        captured.append((title, content))
 
     monkeypatch.setattr(main_module, "app_frame", fake_app_frame)
-    monkeypatch.setattr(main_module, "empty_state", fake_empty_state)
 
     main_module.home_page()
     main_module.projects_page()
@@ -114,11 +113,17 @@ def test_placeholder_pages_use_exact_plan_text(monkeypatch):
     main_module.servers_page()
 
     assert captured == [
-        ("Home", "Server status dashboard will appear here."),
-        ("Projects", "Projects will appear here."),
-        ("Runs", "Runs will appear here."),
-        ("Servers", "Servers will appear here."),
+        ("Home", main_module.render_dashboard_page),
+        ("Projects", captured[1][1]),
+        ("Runs", captured[2][1]),
+        ("Servers", main_module.render_servers_page),
     ]
+
+    messages = []
+    monkeypatch.setattr(main_module, "empty_state", lambda message: messages.append(message))
+    captured[1][1]()
+    captured[2][1]()
+    assert messages == ["Projects will appear here.", "Runs will appear here."]
 
 
 def test_main_initializes_database_and_runs_nicegui_with_settings(monkeypatch):
@@ -166,3 +171,61 @@ def test_settings_page_uses_app_frame_and_shows_settings(monkeypatch):
     assert "Database: /tmp/panel.db" in labels
     assert "Refresh interval: 42s" in labels
     assert "Show debug terminal: True" in labels
+
+
+def test_servers_module_add_server_trims_upserts_and_enables(tmp_path: Path, monkeypatch):
+    from app.ui import servers
+
+    engine = create_engine_for_settings(Settings(db_path=tmp_path / "app.db"))
+    init_db(engine)
+    notices = []
+    reloaded = []
+    monkeypatch.setattr(
+        servers.ui,
+        "notify",
+        lambda message, **kwargs: notices.append((message, kwargs)),
+    )
+    monkeypatch.setattr(servers.ui.navigate, "reload", lambda: reloaded.append(True))
+
+    assert servers.add_server(" gpu01 ", " GPU 01 ", target_engine=engine) is True
+    assert servers.add_server("gpu01", "Renamed", target_engine=engine) is True
+
+    with session_scope(engine) as session:
+        stored = session.query(Server).filter_by(alias="gpu01").one()
+        assert stored.name == "Renamed"
+        assert stored.enabled is True
+
+    assert reloaded == [True, True]
+    assert notices[-1][1]["type"] == "positive"
+
+
+def test_servers_module_add_server_rejects_blank_alias(monkeypatch):
+    from app.ui import servers
+
+    notices = []
+    monkeypatch.setattr(
+        servers.ui,
+        "notify",
+        lambda message, **kwargs: notices.append((message, kwargs)),
+    )
+
+    assert servers.add_server("   ") is False
+
+    assert notices == [("SSH alias is required.", {"type": "negative"})]
+
+
+def test_dashboard_module_loads_enabled_aliases(tmp_path: Path):
+    from app.ui import dashboard
+
+    engine = create_engine_for_settings(Settings(db_path=tmp_path / "app.db"))
+    init_db(engine)
+    with session_scope(engine) as session:
+        session.add_all(
+            [
+                Server(alias="gpu02", name="GPU 02", enabled=True),
+                Server(alias="gpu01", name="GPU 01", enabled=True),
+                Server(alias="old", name="Old", enabled=False),
+            ]
+        )
+
+    assert dashboard.load_enabled_server_aliases(target_engine=engine) == ["gpu01", "gpu02"]
