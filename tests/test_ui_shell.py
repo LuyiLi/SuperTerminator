@@ -34,8 +34,8 @@ class FakeUI:
     def header(self):
         return FakeElement(self.calls, "header")
 
-    def left_drawer(self):
-        return FakeElement(self.calls, "left_drawer")
+    def left_drawer(self, *args, **kwargs):
+        return FakeElement(self.calls, "left_drawer", *args, **kwargs)
 
     def column(self):
         return FakeElement(self.calls, "column")
@@ -59,9 +59,16 @@ def test_app_frame_sets_title_navigation_and_invokes_content(monkeypatch):
 
     layout.app_frame("Projects", lambda: rendered.append("content"))
 
-    assert ("page_title", ("Projects",), {}) in fake_ui.calls
+    assert ("page_title", ("gpu-ssh-panel",), {}) in fake_ui.calls
     assert ("label", ("gpu-ssh-panel",), {}) in fake_ui.calls
     assert ("label", ("Projects",), {}) in fake_ui.calls
+    assert ("classes:header", ("items-center",), {}) in fake_ui.calls
+    assert ("classes:label", ("text-lg font-bold",), {}) in fake_ui.calls
+    assert ("classes:label", ("text-sm opacity-70",), {}) in fake_ui.calls
+    assert ("left_drawer", (), {"value": True}) in fake_ui.calls
+    assert ("classes:left_drawer", ("bg-grey-1",), {}) in fake_ui.calls
+    assert ("classes:link", ("block p-2",), {}) in fake_ui.calls
+    assert ("classes:column", ("w-full p-4 gap-4",), {}) in fake_ui.calls
     assert [call for call in fake_ui.calls if call[0] == "link"] == [
         ("link", (label, target), {}) for label, target in layout.NAV_ITEMS
     ]
@@ -78,9 +85,40 @@ def test_components_render_empty_state_and_error_label(monkeypatch):
     components.error_label("Boom")
 
     assert ("card", (), {}) in fake_ui.calls
+    assert ("classes:card", ("w-full",), {}) in fake_ui.calls
     assert ("label", ("Nothing here yet",), {}) in fake_ui.calls
+    assert ("classes:label", ("text-grey-7",), {}) in fake_ui.calls
     assert ("label", ("Boom",), {}) in fake_ui.calls
     assert ("classes:label", ("text-negative",), {}) in fake_ui.calls
+
+
+def test_placeholder_pages_use_exact_plan_text(monkeypatch):
+    import app.main as main_module
+
+    captured = []
+
+    def fake_app_frame(title, content):
+        content()
+        message = captured.pop()
+        captured.append((title, message))
+
+    def fake_empty_state(message):
+        captured.append(message)
+
+    monkeypatch.setattr(main_module, "app_frame", fake_app_frame)
+    monkeypatch.setattr(main_module, "empty_state", fake_empty_state)
+
+    main_module.home_page()
+    main_module.projects_page()
+    main_module.runs_page()
+    main_module.servers_page()
+
+    assert captured == [
+        ("Home", "Server status dashboard will appear here."),
+        ("Projects", "Projects will appear here."),
+        ("Runs", "Runs will appear here."),
+        ("Servers", "Servers will appear here."),
+    ]
 
 
 def test_main_initializes_database_and_runs_nicegui_with_settings(monkeypatch):
@@ -125,6 +163,6 @@ def test_settings_page_uses_app_frame_and_shows_settings(monkeypatch):
 
     assert captured["title"] == "Settings"
     labels = [call[1][0] for call in fake_ui.calls if call[0] == "label"]
-    assert "Database path: /tmp/panel.db" in labels
-    assert "Refresh interval: 42 seconds" in labels
-    assert "Debug terminal: enabled" in labels
+    assert "Database: /tmp/panel.db" in labels
+    assert "Refresh interval: 42s" in labels
+    assert "Show debug terminal: True" in labels

@@ -13,31 +13,30 @@ settings = load_settings()
 
 @ui.page("/")
 def home_page() -> None:
-    app_frame("Home", lambda: empty_state("Home page placeholder."))
+    app_frame("Home", lambda: empty_state("Server status dashboard will appear here."))
 
 
 @ui.page("/projects")
 def projects_page() -> None:
-    app_frame("Projects", lambda: empty_state("Projects page placeholder."))
+    app_frame("Projects", lambda: empty_state("Projects will appear here."))
 
 
 @ui.page("/runs")
 def runs_page() -> None:
-    app_frame("Runs", lambda: empty_state("Runs page placeholder."))
+    app_frame("Runs", lambda: empty_state("Runs will appear here."))
 
 
 @ui.page("/servers")
 def servers_page() -> None:
-    app_frame("Servers", lambda: empty_state("Servers page placeholder."))
+    app_frame("Servers", lambda: empty_state("Servers will appear here."))
 
 
 @ui.page("/settings")
 def settings_page() -> None:
     def content() -> None:
-        ui.label(f"Database path: {settings.db_path}")
-        ui.label(f"Refresh interval: {settings.refresh_seconds} seconds")
-        debug_terminal = "enabled" if settings.show_debug_terminal else "disabled"
-        ui.label(f"Debug terminal: {debug_terminal}")
+        ui.label(f"Database: {settings.db_path}")
+        ui.label(f"Refresh interval: {settings.refresh_seconds}s")
+        ui.label(f"Show debug terminal: {settings.show_debug_terminal}")
 
     app_frame("Settings", content)
 
