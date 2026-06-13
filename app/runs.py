@@ -14,7 +14,13 @@ def make_tmux_session_name(run_id: int, now: datetime | None = None) -> str:
 
 
 def build_tmux_start_command(session_name: str, *, workdir: str, rendered_command: str) -> str:
-    """Build a command that starts *rendered_command* in a detached tmux session."""
+    """Build a detached tmux start command.
+
+    The wrapper boundaries are quoted: the tmux session name is validated, the working
+    directory is shell-quoted, and the full inner shell command is shell-quoted for tmux.
+    ``rendered_command`` is intentionally preserved raw inside that inner shell command
+    because this app executes user-provided training shell commands by design.
+    """
     session_name = validate_tmux_session_name(session_name)
     inner_command = f"cd {quote_shell(workdir)} && {rendered_command}"
     return f"tmux new-session -d -s {session_name} {quote_shell(inner_command)}"
@@ -22,6 +28,8 @@ def build_tmux_start_command(session_name: str, *, workdir: str, rendered_comman
 
 def build_tmux_capture_command(session_name: str, *, lines: int = 300) -> str:
     """Build a command that captures the last *lines* lines from a tmux session."""
+    if type(lines) is not int:
+        raise TypeError("lines must be an integer")
     if lines <= 0:
         raise ValueError("lines must be positive")
     session_name = validate_tmux_session_name(session_name)

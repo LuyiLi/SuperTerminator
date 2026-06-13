@@ -17,3 +17,9 @@ def test_validate_tmux_session_name_accepts_safe_name():
 def test_validate_tmux_session_name_rejects_shell_metacharacters():
     with pytest.raises(ValueError, match='Invalid tmux session name'):
         validate_tmux_session_name('bad;rm-rf')
+
+
+
+def test_validate_tmux_session_name_rejects_dot():
+    with pytest.raises(ValueError, match='Invalid tmux session name'):
+        validate_tmux_session_name('bad.name')

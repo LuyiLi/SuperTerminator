@@ -28,6 +28,17 @@ def test_build_tmux_start_command_quotes_inner_command_safely():
     )
 
 
+
+def test_build_tmux_start_command_preserves_rendered_command_shell_metacharacters():
+    command = build_tmux_start_command(
+        SESSION_NAME,
+        workdir='/data/my project',
+        rendered_command='python train.py; echo $HOME && touch /tmp/done',
+    )
+
+    assert command == """tmux new-session -d -s gpu-panel-20260613-223000-42 'cd '"'"'/data/my project'"'"' && python train.py; echo $HOME && touch /tmp/done'"""
+
+
 def test_build_tmux_capture_command_uses_negative_line_start():
     assert build_tmux_capture_command(SESSION_NAME, lines=300) == (
         'tmux capture-pane -t gpu-panel-20260613-223000-42 -p -S -300'
@@ -38,6 +49,13 @@ def test_build_tmux_capture_command_uses_negative_line_start():
 @pytest.mark.parametrize('lines', [0, -1])
 def test_build_tmux_capture_command_rejects_non_positive_lines(lines):
     with pytest.raises(ValueError, match='lines must be positive'):
+        build_tmux_capture_command(SESSION_NAME, lines=lines)
+
+
+
+@pytest.mark.parametrize('lines', [True, False, '300', 300.0])
+def test_build_tmux_capture_command_rejects_non_int_lines(lines):
+    with pytest.raises((TypeError, ValueError)):
         build_tmux_capture_command(SESSION_NAME, lines=lines)
 
 

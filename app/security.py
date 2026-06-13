@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 
-TMUX_SESSION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+TMUX_SESSION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def quote_shell(value: str) -> str:
