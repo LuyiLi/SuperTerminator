@@ -4,8 +4,9 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+Type=simple
 WorkingDirectory=/opt/gpu-ssh-panel
-Environment=GPU_SSH_PANEL_HOST=0.0.0.0
+Environment=GPU_SSH_PANEL_HOST=127.0.0.1
 Environment=GPU_SSH_PANEL_PORT=8080
 ExecStart=/usr/bin/env uv run python -m app.main
 Restart=always

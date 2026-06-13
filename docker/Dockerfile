@@ -12,7 +12,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --no-dev --frozen
 
 COPY app ./app
-COPY data/.gitkeep ./data/.gitkeep
+COPY data ./data
 
 EXPOSE 8080
 

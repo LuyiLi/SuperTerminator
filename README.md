@@ -38,18 +38,20 @@ A sample unit is provided at `systemd/gpu-ssh-panel.service`. To install the app
 ```bash
 sudo scripts/install_service.sh
 sudo systemctl start gpu-ssh-panel.service
+sudo systemctl status gpu-ssh-panel
 ```
 
 The installer copies the project with `rsync`, excluding `.git`, `.venv`, and `data/app.db`, then installs the unit into `/etc/systemd/system/` and runs `systemctl daemon-reload` and `systemctl enable`.
 
-The service listens on `0.0.0.0:8080` by default. Edit `/etc/systemd/system/gpu-ssh-panel.service` and run `sudo systemctl daemon-reload && sudo systemctl restart gpu-ssh-panel.service` to change environment settings.
+The service listens on `127.0.0.1:8080` by default. Edit `/etc/systemd/system/gpu-ssh-panel.service` and run `sudo systemctl daemon-reload && sudo systemctl restart gpu-ssh-panel.service` to change environment settings.
 
 ## Optional Docker Compose
 
 A Dockerfile and Compose example are provided under `docker/`:
 
 ```bash
-docker compose -f docker/docker-compose.yml up --build
+cd docker
+docker compose up
 ```
 
 Compose publishes port `8080`, stores app data in `./data`, and mounts your `~/.ssh` directory read-only so the container can use existing SSH configuration and keys.
