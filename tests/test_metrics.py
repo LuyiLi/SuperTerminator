@@ -1,4 +1,8 @@
 from app.metrics import (
+    CPU_COMMAND,
+    DISK_COMMAND,
+    GPU_QUERY_COMMAND,
+    MEMORY_COMMAND,
     parse_cpu_percent,
     parse_disk_lines,
     parse_gpu_csv,
@@ -42,16 +46,29 @@ def test_parse_cpu_percent_returns_float():
     assert parse_cpu_percent("42.7") == 42.7
 
 
-def test_parse_disk_lines_parses_df_header_and_data_rows():
-    raw = "Filesystem Size Used Avail Use% Mounted on\n/dev/sda1 7.0T 3.2T 3.8T 46% /data"
+def test_metric_commands_match_task_5_spec():
+    assert (
+        GPU_QUERY_COMMAND
+        == "nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu --format=csv,noheader,nounits"
+    )
+    assert CPU_COMMAND == r"LC_ALL=C top -bn1 | awk '/Cpu\(s\)/ {print 100 - $8}'"
+    assert MEMORY_COMMAND == "cat /proc/meminfo | grep -E 'MemTotal|MemAvailable'"
+    assert (
+        DISK_COMMAND
+        == "df -h --output=source,size,used,avail,pcent,target | tail -n +2"
+    )
+
+
+def test_parse_disk_lines_parses_task_5_df_rows():
+    raw = "/dev/sda1 7.0T 3.2T 3.8T 46% /data"
 
     assert parse_disk_lines(raw) == [
         {
             "filesystem": "/dev/sda1",
             "size": "7.0T",
             "used": "3.2T",
-            "available": "3.8T",
-            "used_percent": 46,
-            "mountpoint": "/data",
+            "avail": "3.8T",
+            "use_percent": "46%",
+            "mount": "/data",
         }
     ]

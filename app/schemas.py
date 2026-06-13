@@ -11,7 +11,7 @@ class CommandResult:
     stderr: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class ServerStatus:
     alias: str
     online: bool

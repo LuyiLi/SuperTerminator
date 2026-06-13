@@ -1,9 +1,17 @@
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
 
-from app.schemas import CommandResult
+from app.schemas import CommandResult, ServerStatus
 from app.ssh_client import SSHClient, scan_ssh_config_hosts
+
+
+def test_server_status_is_frozen_dataclass():
+    status = ServerStatus(alias="gpu01", online=True)
+
+    with pytest.raises(FrozenInstanceError):
+        status.online = False
 
 
 def test_scan_ssh_config_hosts_ignores_wildcards_and_supports_multiple_aliases(tmp_path: Path):
@@ -13,9 +21,9 @@ def test_scan_ssh_config_hosts_ignores_wildcards_and_supports_multiple_aliases(t
             [
                 "Host *",
                 "  ForwardAgent no",
-                "Host gpu01 gpu-one",
+                "Host gpu01 gpu-one gpu01",
                 "  HostName gpu01.example.com",
-                "Host bastion",
+                "Host bastion !blocked qa? temp* good!bad",
                 "  HostName bastion.example.com",
             ]
         )
@@ -45,7 +53,7 @@ async def test_ssh_client_run_returns_command_result(monkeypatch):
             calls["check"] = check
             return FakeRunResult()
 
-    async def fake_connect(host_alias, known_hosts):
+    def fake_connect(host_alias, known_hosts):
         calls["host_alias"] = host_alias
         calls["known_hosts"] = known_hosts
         return FakeConnection()

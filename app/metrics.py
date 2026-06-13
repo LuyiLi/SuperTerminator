@@ -3,13 +3,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
-GPU_QUERY_COMMAND = (
-    "nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu "
-    "--format=csv,noheader"
-)
-CPU_COMMAND = r"top -bn1 | awk '/Cpu\(s\)/ {print 100 - $8}'"
-MEMORY_COMMAND = "grep -E 'MemTotal|MemAvailable' /proc/meminfo"
-DISK_COMMAND = "df -h --output=source,size,used,avail,pcent,target"
+GPU_QUERY_COMMAND = "nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu --format=csv,noheader,nounits"
+CPU_COMMAND = r"LC_ALL=C top -bn1 | awk '/Cpu\(s\)/ {print 100 - $8}'"
+MEMORY_COMMAND = "cat /proc/meminfo | grep -E 'MemTotal|MemAvailable'"
+DISK_COMMAND = "df -h --output=source,size,used,avail,pcent,target | tail -n +2"
 
 _INT_RE = re.compile(r"\d+")
 
@@ -72,20 +69,19 @@ def parse_cpu_percent(raw: str) -> float:
 
 def parse_disk_lines(raw: str) -> list[dict[str, Any]]:
     disks: list[dict[str, Any]] = []
-    lines = [line for line in raw.splitlines() if line.strip()]
-    for line in lines[1:]:
+    for line in (line for line in raw.splitlines() if line.strip()):
         parts = line.split(maxsplit=5)
         if len(parts) != 6:
             raise ValueError(f"Expected 6 df fields, got {len(parts)}: {line!r}")
-        filesystem, size, used, available, used_percent, mountpoint = parts
+        filesystem, size, used, avail, use_percent, mount = parts
         disks.append(
             {
                 "filesystem": filesystem,
                 "size": size,
                 "used": used,
-                "available": available,
-                "used_percent": _first_int(used_percent),
-                "mountpoint": mountpoint,
+                "avail": avail,
+                "use_percent": use_percent,
+                "mount": mount,
             }
         )
     return disks

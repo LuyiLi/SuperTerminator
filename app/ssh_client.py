@@ -10,8 +10,8 @@ if not hasattr(asyncssh, "wait_for"):
     asyncssh.wait_for = asyncio.wait_for  # type: ignore[attr-defined]
 
 
-def _has_wildcard(pattern: str) -> bool:
-    return any(char in pattern for char in "*?")
+def _has_excluded_pattern_char(pattern: str) -> bool:
+    return any(char in pattern for char in "*?!")
 
 
 def scan_ssh_config_hosts(config_path: str | Path | None = None) -> list[str]:
@@ -24,6 +24,7 @@ def scan_ssh_config_hosts(config_path: str | Path | None = None) -> list[str]:
         return []
 
     hosts: list[str] = []
+    seen: set[str] = set()
     for raw_line in path.read_text().splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -32,25 +33,19 @@ def scan_ssh_config_hosts(config_path: str | Path | None = None) -> list[str]:
         if len(parts) != 2 or parts[0].lower() != "host":
             continue
         for alias in parts[1].split():
-            if not alias.startswith("!") and not _has_wildcard(alias):
-                hosts.append(alias)
+            if _has_excluded_pattern_char(alias) or alias in seen:
+                continue
+            hosts.append(alias)
+            seen.add(alias)
     return hosts
 
 
 class SSHClient:
     async def run(self, host_alias: str, command: str, timeout: int = 30) -> CommandResult:
-        conn = await asyncssh.connect(host_alias, known_hosts=None)
-        try:
+        async with asyncssh.connect(host_alias, known_hosts=None) as conn:
             result = await asyncssh.wait_for(conn.run(command, check=False), timeout=timeout)
             return CommandResult(
                 exit_status=result.exit_status,
                 stdout=result.stdout,
                 stderr=result.stderr,
             )
-        finally:
-            close = getattr(conn, "close", None)
-            if close is not None:
-                close()
-            wait_closed = getattr(conn, "wait_closed", None)
-            if wait_closed is not None:
-                await wait_closed()
