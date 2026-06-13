@@ -10,9 +10,11 @@ from app.metrics import (
 )
 
 
-def test_parse_gpu_csv_returns_gpu_metric_dicts():
+def test_parse_gpu_csv_returns_gpu_metric_dicts_and_skips_malformed_rows():
     raw = (
         "A100-SXM4-80GB, 81920 MiB, 1024 MiB, 50 %\n"
+        "malformed,row\n"
+        "NoInts, total, used, util\n"
         "A100-SXM4-80GB, 81920 MiB, 2048 MiB, 75 %"
     )
 
@@ -22,6 +24,12 @@ def test_parse_gpu_csv_returns_gpu_metric_dicts():
             "memory_total_mib": 81920,
             "memory_used_mib": 1024,
             "utilization_gpu_percent": 50,
+        },
+        {
+            "name": "NoInts",
+            "memory_total_mib": 0,
+            "memory_used_mib": 0,
+            "utilization_gpu_percent": 0,
         },
         {
             "name": "A100-SXM4-80GB",
@@ -42,8 +50,16 @@ def test_parse_memory_line_returns_total_available_and_used_percent():
     }
 
 
-def test_parse_cpu_percent_returns_float():
-    assert parse_cpu_percent("42.7") == 42.7
+def test_parse_memory_line_defaults_missing_values_to_zero():
+    assert parse_memory_line("") == {
+        "total_kib": 0,
+        "available_kib": 0,
+        "used_percent": 0.0,
+    }
+
+
+def test_parse_cpu_percent_returns_rounded_float():
+    assert parse_cpu_percent("42.74") == 42.7
 
 
 def test_metric_commands_match_task_5_spec():
@@ -59,8 +75,12 @@ def test_metric_commands_match_task_5_spec():
     )
 
 
-def test_parse_disk_lines_parses_task_5_df_rows():
-    raw = "/dev/sda1 7.0T 3.2T 3.8T 46% /data"
+def test_parse_disk_lines_skips_header_and_malformed_rows():
+    raw = (
+        "Filesystem Size Used Avail Use% Mounted on\n"
+        "/dev/sda1 7.0T 3.2T 3.8T 46% /data\n"
+        "malformed row"
+    )
 
     assert parse_disk_lines(raw) == [
         {
