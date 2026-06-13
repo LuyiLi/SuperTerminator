@@ -68,7 +68,7 @@ def parse_disk_lines(raw: str) -> list[dict[str, Any]]:
     disks: list[dict[str, Any]] = []
     for line in (line for line in raw.splitlines() if line.strip()):
         parts = line.split(maxsplit=5)
-        if len(parts) != 6 or parts[0] == "Filesystem":
+        if len(parts) != 6 or line.lower().startswith("filesystem"):
             continue
         filesystem, size, used, avail, use_percent, mount = parts
         disks.append(

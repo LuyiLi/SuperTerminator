@@ -78,6 +78,7 @@ def test_metric_commands_match_task_5_spec():
 def test_parse_disk_lines_skips_header_and_malformed_rows():
     raw = (
         "Filesystem Size Used Avail Use% Mounted on\n"
+        "filesystem Size Used Avail Use% Mounted on\n"
         "/dev/sda1 7.0T 3.2T 3.8T 46% /data\n"
         "malformed row"
     )
