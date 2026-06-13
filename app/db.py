@@ -3,16 +3,26 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, load_settings
 from app.models import Base
 
 
+def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
+
+
 def create_engine_for_settings(settings: Settings) -> Engine:
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-    return create_engine(f"sqlite:///{settings.db_path}", future=True)
+    engine = create_engine(f"sqlite:///{settings.db_path}", future=True)
+    event.listen(engine, "connect", _enable_sqlite_foreign_keys)
+    return engine
 
 
 settings = load_settings()

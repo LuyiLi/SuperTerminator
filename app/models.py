@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -25,7 +26,7 @@ class Server(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     alias: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(255), default="")
-    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    tags: Mapped[list[str]] = mapped_column(MutableList.as_mutable(JSON), default=list)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     project_links: Mapped[list[ProjectServer]] = relationship(back_populates="server")
@@ -85,7 +86,9 @@ class Template(TimestampMixin, Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))
     name: Mapped[str] = mapped_column(String(255))
     command_template: Mapped[str] = mapped_column(Text)
-    variables_schema: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    variables_schema: Mapped[list[dict[str, Any]]] = mapped_column(
+        MutableList.as_mutable(JSON), default=list
+    )
 
     project: Mapped[Project] = relationship(back_populates="templates")
     presets: Mapped[list[Preset]] = relationship(
@@ -100,7 +103,9 @@ class Preset(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))
     template_id: Mapped[int] = mapped_column(ForeignKey("templates.id"))
     name: Mapped[str] = mapped_column(String(255))
-    values_json: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    values_json: Mapped[dict[str, str]] = mapped_column(
+        MutableDict.as_mutable(JSON), default=dict
+    )
 
     template: Mapped[Template] = relationship(back_populates="presets")
 
