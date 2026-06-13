@@ -7,3 +7,5 @@ data/app.db
 data/app.db-*
 .pytest_cache/
 .ruff_cache/
+
+*.egg-info/
