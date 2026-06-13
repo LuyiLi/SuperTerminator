@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,7 +18,7 @@ class ServerStatus:
     online: bool
     error: str = ""
     hostname: str = ""
-    gpu: list[dict[str, Any]] = field(default_factory=list)
+    gpu: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
     cpu_percent: float | None = None
-    memory: dict[str, Any] | None = None
-    disks: list[dict[str, Any]] = field(default_factory=list)
+    memory: Mapping[str, Any] | None = None
+    disks: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import MappingProxyType
 from typing import Any
 
 from sqlalchemy import Engine
 
 from app import metrics
 from app.db import session_scope
-from app.models import Preset, Run, Server, Template
+from app.models import Preset, ProjectServer, Run, Server, Template
 from app.runs import (
     build_tmux_capture_command,
     build_tmux_kill_command,
@@ -26,6 +27,14 @@ def _result_error(result: Any) -> str:
         or getattr(result, "stdout", "").strip()
         or f"exit {getattr(result, 'exit_status', 'unknown')}"
     )
+
+
+def _immutable_mapping(value: dict[str, Any]) -> MappingProxyType:
+    return MappingProxyType(dict(value))
+
+
+def _immutable_mapping_tuple(values: list[dict[str, Any]]) -> tuple[MappingProxyType, ...]:
+    return tuple(_immutable_mapping(value) for value in values)
 
 
 async def test_connection(alias: str, ssh_client) -> tuple[bool, str]:
@@ -58,11 +67,24 @@ async def collect_server_status(alias: str, ssh_client) -> ServerStatus:
         alias=alias,
         online=True,
         hostname=hostname.stdout.strip() if hostname.exit_status == 0 else "",
-        gpu=metrics.parse_gpu_csv(gpu.stdout) if gpu.exit_status == 0 else [],
+        gpu=_immutable_mapping_tuple(metrics.parse_gpu_csv(gpu.stdout))
+        if gpu.exit_status == 0
+        else (),
         cpu_percent=metrics.parse_cpu_percent(cpu.stdout) if cpu.exit_status == 0 else None,
-        memory=metrics.parse_memory_line(memory.stdout) if memory.exit_status == 0 else None,
-        disks=metrics.parse_disk_lines(disks.stdout) if disks.exit_status == 0 else [],
+        memory=_immutable_mapping(metrics.parse_memory_line(memory.stdout))
+        if memory.exit_status == 0
+        else None,
+        disks=_immutable_mapping_tuple(metrics.parse_disk_lines(disks.stdout))
+        if disks.exit_status == 0
+        else (),
     )
+
+
+def _mark_run_unknown(engine: Engine, run_id: int) -> None:
+    with session_scope(engine) as session:
+        stored = session.get(Run, run_id)
+        if stored is not None:
+            stored.status = "unknown"
 
 
 async def launch_run(
@@ -85,12 +107,26 @@ async def launch_run(
         template = session.get(Template, template_id)
         if template is None:
             raise ValueError(f"Template not found: {template_id}")
+        if template.project_id != project_id:
+            raise ValueError(f"Template {template_id} does not belong to project {project_id}")
+
+        project_server = (
+            session.query(ProjectServer)
+            .filter_by(project_id=project_id, server_id=server_id, enabled=True)
+            .one_or_none()
+        )
+        if project_server is None:
+            raise ValueError(f"Server {server_id} is not linked to project {project_id}")
 
         preset_values: dict[str, Any] = {}
         if preset_id is not None:
             preset = session.get(Preset, preset_id)
             if preset is None:
                 raise ValueError(f"Preset not found: {preset_id}")
+            if preset.project_id != project_id:
+                raise ValueError(f"Preset {preset_id} does not belong to project {project_id}")
+            if preset.template_id != template_id:
+                raise ValueError(f"Preset {preset_id} does not belong to template {template_id}")
             preset_values = dict(preset.values_json or {})
 
         values = merge_template_values(template.variables_schema, preset_values, form_values)
@@ -119,7 +155,11 @@ async def launch_run(
         )
         run_id = run.id
 
-    result = await ssh_client.run(alias, command, timeout=15)
+    try:
+        result = await ssh_client.run(alias, command, timeout=15)
+    except Exception:
+        _mark_run_unknown(engine, run_id)
+        raise
 
     with session_scope(engine) as session:
         stored = session.get(Run, run_id)

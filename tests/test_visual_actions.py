@@ -20,12 +20,19 @@ from app.visual_actions import (
 
 
 class FakeSSHClient:
-    def __init__(self, responses: dict[str, CommandResult] | None = None):
+    def __init__(
+        self,
+        responses: dict[str, CommandResult] | None = None,
+        raise_on_tmux_start: Exception | None = None,
+    ):
         self.commands: list[tuple[str, str, int]] = []
         self.responses = responses or {}
+        self.raise_on_tmux_start = raise_on_tmux_start
 
     async def run(self, host_alias: str, command: str, timeout: int = 30) -> CommandResult:
         self.commands.append((host_alias, command, timeout))
+        if command.startswith("tmux new-session") and self.raise_on_tmux_start is not None:
+            raise self.raise_on_tmux_start
         if command in self.responses:
             return self.responses[command]
         if command == "echo ok":
@@ -91,7 +98,7 @@ async def test_collect_server_status_returns_offline_status_without_metrics_when
     assert status.online is False
     assert status.error == "network unreachable"
     assert status.hostname == ""
-    assert status.gpu == []
+    assert status.gpu == ()
     assert fake.commands == [("gpu01", "echo ok", 10)]
 
 
@@ -104,17 +111,17 @@ async def test_collect_server_status_runs_metric_commands_and_parses_frozen_stat
     assert status.online is True
     assert status.error == ""
     assert status.hostname == "gpu01"
-    assert status.gpu == [
+    assert status.gpu == (
         {
             "name": "A100",
             "memory_total_mib": 81920,
             "memory_used_mib": 1024,
             "utilization_gpu_percent": 50,
-        }
-    ]
+        },
+    )
     assert status.cpu_percent == 42.0
     assert status.memory == {"total_kib": 1000, "available_kib": 500, "used_percent": 50.0}
-    assert status.disks == [
+    assert status.disks == (
         {
             "filesystem": "/dev/sda1",
             "size": "7.0T",
@@ -122,8 +129,8 @@ async def test_collect_server_status_runs_metric_commands_and_parses_frozen_stat
             "avail": "3.8T",
             "use_percent": "46%",
             "mount": "/data",
-        }
-    ]
+        },
+    )
     assert fake.commands == [
         ("gpu01", "echo ok", 10),
         ("gpu01", "hostname", 10),
@@ -144,23 +151,34 @@ async def test_collect_server_status_allows_malformed_cpu_to_parse_as_none():
     assert status.cpu_percent is None
 
 
-def _seed_launch_data(engine):
+@pytest.mark.asyncio
+async def test_collect_server_status_gpu_collection_is_not_appendable():
+    fake = FakeSSHClient()
+
+    status = await collect_server_status("gpu01", fake)
+
+    with pytest.raises(AttributeError):
+        status.gpu.append({"name": "H100"})
+
+
+def _seed_launch_data(engine, *, link_server: bool = True, link_enabled: bool = True):
     with session_scope(engine) as session:
         server = Server(alias="gpu01", name="GPU 01")
         project = Project(name="demo", default_workdir="/data/demo")
         session.add_all([server, project])
         session.flush()
-        link = ProjectServer(project_id=project.id, server_id=server.id)
-        session.add(link)
-        session.flush()
-        session.add(
-            ProjectWorkdir(
-                project_server_id=link.id,
-                path="/data/demo",
-                label="main",
-                is_default=True,
+        if link_server:
+            link = ProjectServer(project_id=project.id, server_id=server.id, enabled=link_enabled)
+            session.add(link)
+            session.flush()
+            session.add(
+                ProjectWorkdir(
+                    project_server_id=link.id,
+                    path="/data/demo",
+                    label="main",
+                    is_default=True,
+                )
             )
-        )
         template = Template(
             project_id=project.id,
             name="train",
@@ -242,6 +260,183 @@ async def test_launch_run_marks_status_unknown_when_tmux_start_fails(engine, mon
     )
 
     assert run.status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_launch_run_marks_status_unknown_and_reraises_when_tmux_start_raises(
+    engine, monkeypatch
+):
+    monkeypatch.setattr("app.visual_actions.datetime", FixedDateTime)
+    project_id, server_id, template_id, _preset_id = _seed_launch_data(engine)
+    fake = FakeSSHClient(raise_on_tmux_start=RuntimeError("ssh transport lost"))
+
+    with pytest.raises(RuntimeError, match="ssh transport lost"):
+        await launch_run(
+            engine=engine,
+            ssh_client=fake,
+            project_id=project_id,
+            server_id=server_id,
+            template_id=template_id,
+            preset_id=None,
+            workdir="/data/demo",
+            run_name="debug run",
+            form_values={"lr": "1e-4", "epochs": "4"},
+        )
+
+    with session_scope(engine) as session:
+        stored = session.query(Run).one()
+        assert stored.status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_launch_run_rejects_template_from_different_project(engine):
+    project_id, server_id, _template_id, _preset_id = _seed_launch_data(engine)
+    with session_scope(engine) as session:
+        other_project = Project(name="other", default_workdir="/data/other")
+        session.add(other_project)
+        session.flush()
+        other_template = Template(
+            project_id=other_project.id,
+            name="other-train",
+            command_template="python other.py",
+            variables_schema=[],
+        )
+        session.add(other_template)
+        session.flush()
+        other_template_id = other_template.id
+
+    with pytest.raises(ValueError, match="Template .* does not belong to project"):
+        await launch_run(
+            engine=engine,
+            ssh_client=FakeSSHClient(),
+            project_id=project_id,
+            server_id=server_id,
+            template_id=other_template_id,
+            preset_id=None,
+            workdir="/data/demo",
+            run_name="debug run",
+            form_values={},
+        )
+
+    with session_scope(engine) as session:
+        assert session.query(Run).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_launch_run_rejects_preset_from_different_template(engine):
+    project_id, server_id, template_id, _preset_id = _seed_launch_data(engine)
+    with session_scope(engine) as session:
+        other_template = Template(
+            project_id=project_id,
+            name="other-train",
+            command_template="python other.py",
+            variables_schema=[],
+        )
+        session.add(other_template)
+        session.flush()
+        other_preset = Preset(
+            project_id=project_id,
+            template_id=other_template.id,
+            name="other",
+            values_json={},
+        )
+        session.add(other_preset)
+        session.flush()
+        other_preset_id = other_preset.id
+
+    with pytest.raises(ValueError, match="Preset .* does not belong to template"):
+        await launch_run(
+            engine=engine,
+            ssh_client=FakeSSHClient(),
+            project_id=project_id,
+            server_id=server_id,
+            template_id=template_id,
+            preset_id=other_preset_id,
+            workdir="/data/demo",
+            run_name="debug run",
+            form_values={"lr": "1e-4", "epochs": "4"},
+        )
+
+    with session_scope(engine) as session:
+        assert session.query(Run).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_launch_run_rejects_preset_from_different_project(engine):
+    project_id, server_id, template_id, _preset_id = _seed_launch_data(engine)
+    with session_scope(engine) as session:
+        other_project = Project(name="other", default_workdir="/data/other")
+        session.add(other_project)
+        session.flush()
+        mismatched_preset = Preset(
+            project_id=other_project.id,
+            template_id=template_id,
+            name="other-project",
+            values_json={"lr": "9e-9"},
+        )
+        session.add(mismatched_preset)
+        session.flush()
+        mismatched_preset_id = mismatched_preset.id
+
+    with pytest.raises(ValueError, match="Preset .* does not belong to project"):
+        await launch_run(
+            engine=engine,
+            ssh_client=FakeSSHClient(),
+            project_id=project_id,
+            server_id=server_id,
+            template_id=template_id,
+            preset_id=mismatched_preset_id,
+            workdir="/data/demo",
+            run_name="debug run",
+            form_values={"epochs": "4"},
+        )
+
+    with session_scope(engine) as session:
+        assert session.query(Run).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_launch_run_rejects_server_not_linked_to_project(engine):
+    project_id, server_id, template_id, _preset_id = _seed_launch_data(engine, link_server=False)
+
+    with pytest.raises(ValueError, match="Server .* is not linked to project"):
+        await launch_run(
+            engine=engine,
+            ssh_client=FakeSSHClient(),
+            project_id=project_id,
+            server_id=server_id,
+            template_id=template_id,
+            preset_id=None,
+            workdir="/data/demo",
+            run_name="debug run",
+            form_values={"lr": "1e-4", "epochs": "4"},
+        )
+
+    with session_scope(engine) as session:
+        assert session.query(Run).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_launch_run_rejects_server_with_disabled_project_link(engine):
+    project_id, server_id, template_id, _preset_id = _seed_launch_data(
+        engine, link_server=True, link_enabled=False
+    )
+
+    with pytest.raises(ValueError, match="Server .* is not linked to project"):
+        await launch_run(
+            engine=engine,
+            ssh_client=FakeSSHClient(),
+            project_id=project_id,
+            server_id=server_id,
+            template_id=template_id,
+            preset_id=None,
+            workdir="/data/demo",
+            run_name="debug run",
+            form_values={"lr": "1e-4", "epochs": "4"},
+        )
+
+    with session_scope(engine) as session:
+        assert session.query(Run).count() == 0
 
 
 @pytest.mark.asyncio
