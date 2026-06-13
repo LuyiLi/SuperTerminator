@@ -1,28 +1,50 @@
 from __future__ import annotations
 
-import os
-
 from nicegui import ui
 
+from app.config import load_settings
+from app.db import init_db
+from app.ui.components import empty_state
+from app.ui.layout import app_frame
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+settings = load_settings()
 
 
 @ui.page("/")
-def index() -> None:
-    ui.label("gpu-ssh-panel")
-    ui.label("Initial placeholder app. Task 7 will expand this UI.")
+def home_page() -> None:
+    app_frame("Home", lambda: empty_state("Home page placeholder."))
+
+
+@ui.page("/projects")
+def projects_page() -> None:
+    app_frame("Projects", lambda: empty_state("Projects page placeholder."))
+
+
+@ui.page("/runs")
+def runs_page() -> None:
+    app_frame("Runs", lambda: empty_state("Runs page placeholder."))
+
+
+@ui.page("/servers")
+def servers_page() -> None:
+    app_frame("Servers", lambda: empty_state("Servers page placeholder."))
+
+
+@ui.page("/settings")
+def settings_page() -> None:
+    def content() -> None:
+        ui.label(f"Database path: {settings.db_path}")
+        ui.label(f"Refresh interval: {settings.refresh_seconds} seconds")
+        debug_terminal = "enabled" if settings.show_debug_terminal else "disabled"
+        ui.label(f"Debug terminal: {debug_terminal}")
+
+    app_frame("Settings", content)
 
 
 def main() -> None:
-    host = os.getenv("GPU_SSH_PANEL_HOST", "127.0.0.1")
-    port = int(os.getenv("GPU_SSH_PANEL_PORT", "8080"))
-    reload = _env_bool("GPU_SSH_PANEL_RELOAD", False)
-    ui.run(host=host, port=port, reload=reload)
+    init_db()
+    ui.run(host=settings.host, port=settings.port, reload=settings.reload, title="gpu-ssh-panel")
 
 
 if __name__ in {"__main__", "__mp_main__"}:
