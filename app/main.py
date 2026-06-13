@@ -4,10 +4,10 @@ from nicegui import ui
 
 from app.config import load_settings
 from app.db import init_db
-from app.ui.components import empty_state
 from app.ui.dashboard import render_dashboard_page
 from app.ui.projects import render_project_detail, render_projects_page
 from app.ui.layout import app_frame
+from app.ui.runs import render_run_detail, render_runs_page
 from app.ui.servers import render_servers_page
 
 
@@ -31,7 +31,12 @@ def project_detail_page(project_id: int) -> None:
 
 @ui.page("/runs")
 def runs_page() -> None:
-    app_frame("Runs", lambda: empty_state("Runs will appear here."))
+    app_frame("Runs", render_runs_page)
+
+
+@ui.page("/runs/{run_id}")
+def run_detail_page(run_id: int) -> None:
+    app_frame("Run", lambda: render_run_detail(int(run_id)))
 
 
 @ui.page("/servers")
