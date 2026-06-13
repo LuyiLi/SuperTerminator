@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app.config import Settings
 from app.db import create_engine_for_settings, init_db, session_scope
 from app.models import Server
@@ -229,3 +231,36 @@ def test_dashboard_module_loads_enabled_aliases(tmp_path: Path):
         )
 
     assert dashboard.load_enabled_server_aliases(target_engine=engine) == ["gpu01", "gpu02"]
+
+
+@pytest.mark.asyncio
+async def test_servers_module_test_server_notifies_when_connection_check_raises(monkeypatch):
+    from app.ui import servers
+
+    notices = []
+
+    async def boom(alias, ssh_client):
+        raise RuntimeError("network exploded")
+
+    monkeypatch.setattr(servers, "test_connection", boom)
+    monkeypatch.setattr(
+        servers.ui,
+        "notify",
+        lambda message, **kwargs: notices.append((message, kwargs)),
+    )
+
+    await servers._test_server("gpu01")
+
+    assert notices == [("gpu01: network exploded", {"type": "negative"})]
+
+
+def test_dashboard_refresh_guard_marks_older_generations_stale():
+    from app.ui.dashboard import DashboardRefreshGuard
+
+    guard = DashboardRefreshGuard()
+    older = guard.next_generation()
+    newer = guard.next_generation()
+
+    assert older < newer
+    assert guard.is_current(older) is False
+    assert guard.is_current(newer) is True

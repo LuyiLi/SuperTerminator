@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 from nicegui import ui
 from sqlalchemy import Engine
 
@@ -47,15 +45,22 @@ def _candidate_aliases(managed_aliases: set[str]) -> list[str]:
 
 
 async def _test_server(alias: str) -> None:
-    ok, message = await test_connection(alias, SSHClient())
+    try:
+        ok, message = await test_connection(alias, SSHClient())
+    except Exception as exc:  # pragma: no cover - defensive around real SSH callbacks
+        _notify(f"{alias}: {exc}", type="negative")
+        return
     if ok:
         _notify(f"{alias}: connection ok", type="positive")
     else:
         _notify(f"{alias}: {message}", type="negative")
 
 
-def _run_connection_test(alias: str) -> None:
-    asyncio.create_task(_test_server(alias))
+def _test_button_handler(alias: str):
+    async def handler() -> None:
+        await _test_server(alias)
+
+    return handler
 
 
 def _server_card(server: Server) -> None:
@@ -67,7 +72,7 @@ def _server_card(server: Server) -> None:
                 ui.label(server.alias).classes("text-lg font-semibold")
                 ui.label(server.name or server.alias).classes("text-grey-7")
                 ui.label(status).classes(status_class)
-            ui.button("Test", on_click=lambda alias=server.alias: _run_connection_test(alias))
+            ui.button("Test", on_click=_test_button_handler(server.alias))
 
 
 def render_servers_page() -> None:

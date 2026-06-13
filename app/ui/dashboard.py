@@ -16,6 +16,21 @@ from app.visual_actions import collect_server_status
 settings = load_settings()
 
 
+class DashboardRefreshGuard:
+    """Coordinate refreshes so older results cannot overwrite newer requests."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self._generation = 0
+
+    def next_generation(self) -> int:
+        self._generation += 1
+        return self._generation
+
+    def is_current(self, generation: int) -> bool:
+        return generation == self._generation
+
+
 def load_enabled_server_aliases(*, target_engine: Engine = engine) -> list[str]:
     """Return enabled server aliases in stable display order."""
 
@@ -98,28 +113,41 @@ def render_dashboard_page() -> None:
     ui.label(f"Auto-refreshes every {settings.refresh_seconds}s.").classes("text-grey-7")
 
     container = ui.column().classes("w-full gap-4")
+    refresh_guard = DashboardRefreshGuard()
 
-    async def refresh() -> None:
-        aliases = load_enabled_server_aliases()
+    def render_empty_state() -> None:
         container.clear()
         with container:
+            with ui.card().classes("w-full"):
+                ui.label("No enabled servers. Add one on the Servers page.").classes(
+                    "text-grey-7"
+                )
+
+    def render_results(aliases: list[str], results: list[ServerStatus | BaseException]) -> None:
+        container.clear()
+        with container:
+            for alias, result in zip(aliases, results, strict=True):
+                if isinstance(result, BaseException):
+                    status = ServerStatus(alias=alias, online=False, error=str(result))
+                else:
+                    status = result
+                _render_status_card(status)
+
+    async def refresh() -> None:
+        generation = refresh_guard.next_generation()
+        async with refresh_guard.lock:
+            aliases = load_enabled_server_aliases()
             if not aliases:
-                with ui.card().classes("w-full"):
-                    ui.label("No enabled servers. Add one on the Servers page.").classes(
-                        "text-grey-7"
-                    )
+                if refresh_guard.is_current(generation):
+                    render_empty_state()
                 return
 
             results = await asyncio.gather(
                 *(collect_server_status(alias, SSHClient()) for alias in aliases),
                 return_exceptions=True,
             )
-            for alias, result in zip(aliases, results, strict=True):
-                if isinstance(result, Exception):
-                    status = ServerStatus(alias=alias, online=False, error=str(result))
-                else:
-                    status = result
-                _render_status_card(status)
+            if refresh_guard.is_current(generation):
+                render_results(aliases, results)
 
     ui.button("Manual Refresh", on_click=refresh)
     ui.timer(settings.refresh_seconds, refresh)
