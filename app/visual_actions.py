@@ -10,7 +10,7 @@ from sqlalchemy import Engine
 
 from app import metrics
 from app.db import session_scope
-from app.models import Preset, ProjectServer, Run, Server, Template
+from app.models import Preset, ProjectServer, ProjectWorkdir, Run, Server, Template
 from app.runs import (
     build_tmux_capture_command,
     build_tmux_kill_command,
@@ -117,6 +117,13 @@ async def launch_run(
         )
         if project_server is None:
             raise ValueError(f"Server {server_id} is not linked to project {project_id}")
+        project_workdir = (
+            session.query(ProjectWorkdir)
+            .filter_by(project_server_id=project_server.id, path=workdir)
+            .one_or_none()
+        )
+        if project_workdir is None:
+            raise ValueError(f"Workdir {workdir} is not configured for server {server_id}")
 
         preset_values: dict[str, Any] = {}
         if preset_id is not None:

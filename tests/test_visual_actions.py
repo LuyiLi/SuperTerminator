@@ -9,7 +9,7 @@ from app.config import Settings
 from app.db import create_engine_for_settings, init_db, session_scope
 from app.metrics import CPU_COMMAND, DISK_COMMAND, GPU_QUERY_COMMAND, MEMORY_COMMAND
 from app.models import Preset, Project, ProjectServer, ProjectWorkdir, Run, Server, Template
-from app.schemas import CommandResult
+from app.schemas import CommandResult, ServerStatus
 from app.visual_actions import (
     capture_run_output,
     collect_server_status,
@@ -159,6 +159,35 @@ async def test_collect_server_status_gpu_collection_is_not_appendable():
 
     with pytest.raises(AttributeError):
         status.gpu.append({"name": "H100"})
+
+
+def test_server_status_direct_construction_freezes_mutable_inputs():
+    gpu = {"name": "A100"}
+    memory = {"used_percent": 50.0}
+    disk = {"mount": "/data"}
+
+    status = ServerStatus(
+        alias="gpu01",
+        online=True,
+        gpu=[gpu],
+        memory=memory,
+        disks=[disk],
+    )
+
+    gpu["name"] = "H100"
+    memory["used_percent"] = 99.0
+    disk["mount"] = "/other"
+
+    assert status.gpu[0]["name"] == "A100"
+    assert status.memory["used_percent"] == 50.0
+    assert status.disks[0]["mount"] == "/data"
+
+    with pytest.raises(TypeError):
+        status.gpu[0]["name"] = "H100"
+    with pytest.raises(TypeError):
+        status.memory["used_percent"] = 99.0
+    with pytest.raises(TypeError):
+        status.disks[0]["mount"] = "/other"
 
 
 def _seed_launch_data(engine, *, link_server: bool = True, link_enabled: bool = True):
@@ -431,6 +460,42 @@ async def test_launch_run_rejects_server_with_disabled_project_link(engine):
             template_id=template_id,
             preset_id=None,
             workdir="/data/demo",
+            run_name="debug run",
+            form_values={"lr": "1e-4", "epochs": "4"},
+        )
+
+    with session_scope(engine) as session:
+        assert session.query(Run).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_launch_run_rejects_workdir_from_different_project_server(engine):
+    project_id, server_id, template_id, _preset_id = _seed_launch_data(engine)
+    with session_scope(engine) as session:
+        other_server = Server(alias="gpu02", name="GPU 02")
+        session.add(other_server)
+        session.flush()
+        other_link = ProjectServer(project_id=project_id, server_id=other_server.id)
+        session.add(other_link)
+        session.flush()
+        session.add(
+            ProjectWorkdir(
+                project_server_id=other_link.id,
+                path="/data/other-server",
+                label="other",
+                is_default=True,
+            )
+        )
+
+    with pytest.raises(ValueError, match="Workdir .* is not configured for server"):
+        await launch_run(
+            engine=engine,
+            ssh_client=FakeSSHClient(),
+            project_id=project_id,
+            server_id=server_id,
+            template_id=template_id,
+            preset_id=None,
+            workdir="/data/other-server",
             run_name="debug run",
             form_values={"lr": "1e-4", "epochs": "4"},
         )
