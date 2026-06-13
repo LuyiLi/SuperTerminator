@@ -1,5 +1,7 @@
 from datetime import datetime
 
+import pytest
+
 from app.runs import (
     build_tmux_capture_command,
     build_tmux_has_session_command,
@@ -30,6 +32,13 @@ def test_build_tmux_capture_command_uses_negative_line_start():
     assert build_tmux_capture_command(SESSION_NAME, lines=300) == (
         'tmux capture-pane -t gpu-panel-20260613-223000-42 -p -S -300'
     )
+
+
+
+@pytest.mark.parametrize('lines', [0, -1])
+def test_build_tmux_capture_command_rejects_non_positive_lines(lines):
+    with pytest.raises(ValueError, match='lines must be positive'):
+        build_tmux_capture_command(SESSION_NAME, lines=lines)
 
 
 def test_build_tmux_kill_command_targets_session():

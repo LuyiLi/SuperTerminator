@@ -22,6 +22,8 @@ def build_tmux_start_command(session_name: str, *, workdir: str, rendered_comman
 
 def build_tmux_capture_command(session_name: str, *, lines: int = 300) -> str:
     """Build a command that captures the last *lines* lines from a tmux session."""
+    if lines <= 0:
+        raise ValueError("lines must be positive")
     session_name = validate_tmux_session_name(session_name)
     return f"tmux capture-pane -t {session_name} -p -S -{lines}"
 
