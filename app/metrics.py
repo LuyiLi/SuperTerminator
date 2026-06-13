@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -62,9 +63,12 @@ def parse_memory_line(raw: str) -> dict[str, float | int]:
 
 def parse_cpu_percent(raw: str) -> float | None:
     try:
-        return round(float(raw.strip()), 1)
+        value = float(raw.strip())
     except ValueError:
         return None
+    if not math.isfinite(value):
+        return None
+    return round(value, 1)
 
 
 def parse_disk_lines(raw: str) -> list[dict[str, Any]]:
