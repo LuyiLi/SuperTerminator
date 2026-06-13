@@ -62,6 +62,11 @@ def test_parse_cpu_percent_returns_rounded_float():
     assert parse_cpu_percent("42.74") == 42.7
 
 
+def test_parse_cpu_percent_returns_none_for_empty_or_malformed_output():
+    assert parse_cpu_percent("") is None
+    assert parse_cpu_percent("not-a-number") is None
+
+
 def test_metric_commands_match_task_5_spec():
     assert (
         GPU_QUERY_COMMAND

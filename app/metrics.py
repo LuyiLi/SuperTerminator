@@ -60,8 +60,11 @@ def parse_memory_line(raw: str) -> dict[str, float | int]:
     }
 
 
-def parse_cpu_percent(raw: str) -> float:
-    return round(float(raw.strip()), 1)
+def parse_cpu_percent(raw: str) -> float | None:
+    try:
+        return round(float(raw.strip()), 1)
+    except ValueError:
+        return None
 
 
 def parse_disk_lines(raw: str) -> list[dict[str, Any]]:
