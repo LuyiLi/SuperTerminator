@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from nicegui import ui
@@ -14,6 +16,21 @@ from app.visual_actions import capture_run_output, stop_run
 
 
 settings = load_settings()
+
+
+class RunOutputRefreshGuard:
+    """Coordinate output refreshes so stale captures cannot overwrite newer requests."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self._generation = 0
+
+    def next_generation(self) -> int:
+        self._generation += 1
+        return self._generation
+
+    def is_current(self, generation: int) -> bool:
+        return generation == self._generation
 
 
 def _notify(message: str, *, type: str = "info") -> None:
@@ -80,6 +97,58 @@ def mark_run_exited(run_id: int, *, target_engine: Engine = engine) -> bool:
         return True
 
 
+async def refresh_run_output(
+    output: Any,
+    run: dict[str, Any],
+    guard: RunOutputRefreshGuard,
+    *,
+    capture: Callable[..., Awaitable[str]] = capture_run_output,
+    ssh_client_factory: Callable[[], Any] = SSHClient,
+) -> None:
+    """Refresh tmux output, ignoring results made stale by newer refresh requests."""
+
+    generation = guard.next_generation()
+    async with guard.lock:
+        try:
+            captured = await capture(
+                run["server_alias"],
+                run["tmux_session"],
+                ssh_client_factory(),
+                lines=300,
+            )
+        except Exception as exc:  # pragma: no cover - defensive around real SSH callbacks
+            if guard.is_current(generation):
+                output.value = str(exc)
+                _notify(str(exc), type="negative")
+            return
+        if guard.is_current(generation):
+            output.value = captured
+
+
+async def stop_run_session(
+    run_id: int,
+    run: dict[str, Any],
+    *,
+    stop: Callable[..., Awaitable[tuple[bool, str]]] = stop_run,
+    mark_exited: Callable[[int], bool] = mark_run_exited,
+    ssh_client_factory: Callable[[], Any] = SSHClient,
+) -> None:
+    """Stop a remote tmux session and persist the local exited status."""
+
+    try:
+        ok, message = await stop(run["server_alias"], run["tmux_session"], ssh_client_factory())
+    except Exception as exc:  # pragma: no cover - defensive around real SSH callbacks
+        _notify(str(exc), type="negative")
+        return
+    if not ok:
+        _notify(message, type="negative")
+        return
+    if not mark_exited(run_id):
+        _notify("Run stopped but could not update local status.", type="negative")
+        return
+    _notify("Run stopped.", type="positive")
+
+
 def render_runs_page() -> None:
     """Render the latest runs overview."""
 
@@ -125,30 +194,13 @@ def render_run_detail(run_id: int) -> None:
 
     output = ui.textarea("tmux output", value="").classes("w-full")
     output.props("readonly autogrow")
+    refresh_guard = RunOutputRefreshGuard()
 
     async def refresh_output() -> None:
-        try:
-            output.value = await capture_run_output(
-                run["server_alias"],
-                run["tmux_session"],
-                SSHClient(),
-                lines=300,
-            )
-        except Exception as exc:  # pragma: no cover - defensive around real SSH callbacks
-            output.value = str(exc)
-            _notify(str(exc), type="negative")
+        await refresh_run_output(output, run, refresh_guard)
 
     async def do_stop() -> None:
-        try:
-            ok, message = await stop_run(run["server_alias"], run["tmux_session"], SSHClient())
-        except Exception as exc:  # pragma: no cover - defensive around real SSH callbacks
-            _notify(str(exc), type="negative")
-            return
-        if ok:
-            mark_run_exited(run_id)
-            _notify("Run stopped.", type="positive")
-        else:
-            _notify(message, type="negative")
+        await stop_run_session(run_id, run)
 
     with ui.row().classes("gap-3"):
         ui.button("Refresh output", on_click=refresh_output)

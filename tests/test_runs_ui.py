@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from app.config import Settings
 from app.db import create_engine_for_settings, init_db, session_scope
@@ -67,6 +71,80 @@ def test_mark_run_exited_updates_status(tmp_path: Path):
 
     with session_scope(engine) as session:
         assert session.get(Run, run_id).status == "exited"
+
+
+def test_run_output_refresh_guard_marks_older_generations_stale():
+    from app.ui.runs import RunOutputRefreshGuard
+
+    guard = RunOutputRefreshGuard()
+    older = guard.next_generation()
+    newer = guard.next_generation()
+
+    assert older < newer
+    assert guard.is_current(older) is False
+    assert guard.is_current(newer) is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_run_output_does_not_overwrite_with_stale_result():
+    from app.ui import runs
+
+    guard = runs.RunOutputRefreshGuard()
+    output = SimpleNamespace(value="")
+    run = {"server_alias": "gpu01", "tmux_session": "session-a"}
+    first_capture_started = asyncio.Event()
+    first_capture_can_finish = asyncio.Event()
+    second_capture_can_finish = asyncio.Event()
+    calls = 0
+
+    async def fake_capture(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_capture_started.set()
+            await first_capture_can_finish.wait()
+            return "old output"
+        await second_capture_can_finish.wait()
+        return "new output"
+
+    first = asyncio.create_task(
+        runs.refresh_run_output(output, run, guard, capture=fake_capture, ssh_client_factory=object)
+    )
+    await first_capture_started.wait()
+    second = asyncio.create_task(
+        runs.refresh_run_output(output, run, guard, capture=fake_capture, ssh_client_factory=object)
+    )
+    await asyncio.sleep(0)
+
+    first_capture_can_finish.set()
+    await asyncio.sleep(0)
+    assert output.value == ""
+
+    second_capture_can_finish.set()
+    await asyncio.gather(first, second)
+
+    assert output.value == "new output"
+
+
+@pytest.mark.asyncio
+async def test_stop_run_session_notifies_negative_when_stopped_run_cannot_be_marked_exited(monkeypatch):
+    from app.ui import runs
+
+    notices = []
+    monkeypatch.setattr(runs.ui, "notify", lambda message, **kwargs: notices.append((message, kwargs)))
+
+    async def fake_stop(*_args, **_kwargs):
+        return True, "stopped"
+
+    await runs.stop_run_session(
+        123,
+        {"server_alias": "gpu01", "tmux_session": "session-a"},
+        stop=fake_stop,
+        mark_exited=lambda _run_id: False,
+        ssh_client_factory=object,
+    )
+
+    assert notices == [("Run stopped but could not update local status.", {"type": "negative"})]
 
 
 def test_runs_routes_are_wired(monkeypatch):
