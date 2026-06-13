@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -77,8 +78,13 @@ def test_server_workdir_helpers_link_enabled_servers_and_options(engine, monkeyp
     ]
 
     options = projects.build_launch_options(project_id, target_engine=engine)
-    assert options.server_options == {"gpu01": enabled_id}
-    assert options.workdir_options == {"gpu01: default (/data/default)": "/data/default", "gpu01: alt (/data/alt)": "/data/alt"}
+    assert options.server_options == {enabled_id: "gpu01"}
+    assert all(isinstance(value, int) for value in options.server_options)
+    assert options.workdir_options == {
+        "/data/default": "gpu01: default (/data/default)",
+        "/data/alt": "gpu01: alt (/data/alt)",
+    }
+    assert all(path.startswith("/data/") for path in options.workdir_options)
 
 
 def test_template_and_preset_helpers_build_schema_and_validate_json_like_values(engine, monkeypatch):
@@ -116,8 +122,49 @@ def test_template_and_preset_helpers_build_schema_and_validate_json_like_values(
         assert preset.values_json == {"lr": "1e-4", "epochs": "2"}
 
     options = projects.build_launch_options(project_id, target_engine=engine)
-    assert options.template_options == {"train": template_id}
-    assert options.preset_options == {"None": None, "quick": preset_id}
+    assert options.template_options == {template_id: "train"}
+    assert all(isinstance(value, int) for value in options.template_options)
+    assert options.preset_options == {None: "None", preset_id: "quick"}
+    assert None in options.preset_options
+    assert any(isinstance(value, int) for value in options.preset_options if value is not None)
+
+
+def test_project_form_selects_use_nicegui_value_to_label_contract(monkeypatch):
+    from app.ui import projects
+
+    captured_selects = []
+
+    class FakeElement:
+        value = None
+
+        def classes(self, *_args, **_kwargs):
+            return self
+
+    fake_ui = SimpleNamespace(
+        label=lambda *_args, **_kwargs: FakeElement(),
+        input=lambda *_args, **_kwargs: FakeElement(),
+        textarea=lambda *_args, **_kwargs: FakeElement(),
+        button=lambda *_args, **_kwargs: FakeElement(),
+        separator=lambda *_args, **_kwargs: None,
+        select=lambda options, **kwargs: captured_selects.append((kwargs.get("label"), options)) or FakeElement(),
+    )
+    monkeypatch.setattr(projects, "ui", fake_ui)
+    monkeypatch.setattr(projects, "list_unlinked_enabled_servers", lambda project_id: [(7, "gpu01")])
+    monkeypatch.setattr(projects, "list_project_servers", lambda project_id: [])
+    monkeypatch.setattr(
+        projects,
+        "list_project_templates",
+        lambda project_id: [SimpleNamespace(id=11, name="train")],
+    )
+    monkeypatch.setattr(projects, "list_project_presets", lambda project_id: [])
+
+    projects._render_servers_workdirs_tab(1, "/data/default")
+    projects._render_presets_tab(1)
+
+    assert captured_selects == [
+        ("Enabled server not linked", {7: "gpu01"}),
+        ("Template", {11: "train"}),
+    ]
 
 
 def test_project_detail_route_is_wired(monkeypatch):

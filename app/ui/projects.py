@@ -272,9 +272,9 @@ def list_project_presets(project_id: int, *, target_engine: Engine = engine) -> 
 
 @dataclass(frozen=True)
 class LaunchOptions:
-    template_options: dict[str, int]
-    preset_options: dict[str, int | None]
-    server_options: dict[str, int]
+    template_options: dict[int, str]
+    preset_options: dict[int | None, str]
+    server_options: dict[int, str]
     workdir_options: dict[str, str]
     templates: dict[int, Template]
     presets: dict[int, Preset]
@@ -294,12 +294,12 @@ def build_launch_options(project_id: int, *, target_engine: Engine = engine) -> 
             .all()
         )
 
-        template_options = {template.name: template.id for template in templates}
-        preset_options: dict[str, int | None] = {"None": None}
-        preset_options.update({preset.name: preset.id for preset in presets})
-        server_options = {link.server.alias: link.server_id for link in links}
+        template_options = {template.id: template.name for template in templates}
+        preset_options: dict[int | None, str] = {None: "None"}
+        preset_options.update({preset.id: preset.name for preset in presets})
+        server_options = {link.server_id: link.server.alias for link in links}
         workdir_options = {
-            f"{link.server.alias}: {workdir.label} ({workdir.path})": workdir.path
+            workdir.path: f"{link.server.alias}: {workdir.label} ({workdir.path})"
             for link in links
             for workdir in sorted(link.workdirs, key=lambda item: (not item.is_default, item.label, item.path))
         }
@@ -377,7 +377,7 @@ def render_project_detail(project_id: int) -> None:
 def _render_servers_workdirs_tab(project_id: int, default_workdir: str) -> None:
     ui.label("Servers & Workdirs").classes("text-xl font-semibold")
     unlinked = list_unlinked_enabled_servers(project_id)
-    server_options = {alias: server_id for server_id, alias in unlinked}
+    server_options = {server_id: alias for server_id, alias in unlinked}
     server_select = ui.select(server_options, label="Enabled server not linked").classes("w-96")
     default_workdir_input = ui.input("Initial workdir (optional)", value=default_workdir).classes("w-full")
 
@@ -442,7 +442,7 @@ def _render_templates_tab(project_id: int) -> None:
 def _render_presets_tab(project_id: int) -> None:
     ui.label("Presets").classes("text-xl font-semibold")
     templates = list_project_templates(project_id)
-    template_options = {template.name: template.id for template in templates}
+    template_options = {template.id: template.name for template in templates}
     template_select = ui.select(template_options, label="Template").classes("w-96")
     name_input = ui.input("Preset name").classes("w-96")
     values_input = ui.textarea("Values JSON", placeholder='{"lr": "1e-4"}').classes("w-full")
