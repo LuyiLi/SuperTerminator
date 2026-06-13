@@ -117,3 +117,31 @@ def test_template_variables_schema_in_place_append_persists(tmp_path: Path):
         template = session.get(Template, template_id)
         assert template is not None
         assert template.variables_schema == [{"name": "env"}, {"name": "region"}]
+
+
+def test_template_variables_schema_nested_dict_mutation_persists(tmp_path: Path):
+    settings = Settings(db_path=tmp_path / "app.db")
+    engine = create_engine_for_settings(settings)
+    init_db(engine)
+
+    with session_scope(engine) as session:
+        project = Project(name="demo")
+        template = Template(
+            project=project,
+            name="deploy",
+            command_template="echo {env}",
+            variables_schema=[{"name": "env"}],
+        )
+        session.add_all([project, template])
+        session.flush()
+        template_id = template.id
+
+    with session_scope(engine) as session:
+        template = session.get(Template, template_id)
+        assert template is not None
+        template.variables_schema[0]["required"] = True
+
+    with session_scope(engine) as session:
+        template = session.get(Template, template_id)
+        assert template is not None
+        assert template.variables_schema[0]["required"] is True

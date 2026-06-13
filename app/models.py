@@ -9,6 +9,71 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
 
+class NestedMutableDict(MutableDict):
+    """Mutable dict that marks its containing mutable list as changed."""
+
+    _parent_list: NestedMutableList | None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._parent_list = None
+
+    @classmethod
+    def coerce(cls, key: str | None, value: Any) -> Any:
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, dict):
+            return cls(value)
+        return MutableDict.coerce(key, value)
+
+    def with_parent(self, parent: NestedMutableList) -> NestedMutableDict:
+        self._parent_list = parent
+        return self
+
+    def changed(self) -> None:
+        super().changed()
+        if self._parent_list is not None:
+            self._parent_list.changed()
+
+
+class NestedMutableList(MutableList):
+    """Mutable list that wraps contained dicts so nested edits are tracked."""
+
+    def __init__(self, iterable: list[Any] | None = None) -> None:
+        super().__init__()
+        if iterable is not None:
+            self.extend(iterable)
+
+    @classmethod
+    def coerce(cls, key: str | None, value: Any) -> Any:
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, list):
+            return cls(value)
+        return MutableList.coerce(key, value)
+
+    def _coerce_item(self, item: Any) -> Any:
+        if isinstance(item, dict):
+            return NestedMutableDict.coerce(None, item).with_parent(self)
+        return item
+
+    def append(self, item: Any) -> None:
+        super().append(self._coerce_item(item))
+
+    def extend(self, iterable: list[Any]) -> None:
+        super().extend(self._coerce_item(item) for item in iterable)
+
+    def insert(self, index: int, item: Any) -> None:
+        super().insert(index, self._coerce_item(item))
+
+    def __setitem__(self, index: Any, value: Any) -> None:
+        if isinstance(index, slice):
+            value = [self._coerce_item(item) for item in value]
+        else:
+            value = self._coerce_item(value)
+        super().__setitem__(index, value)
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -87,7 +152,7 @@ class Template(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255))
     command_template: Mapped[str] = mapped_column(Text)
     variables_schema: Mapped[list[dict[str, Any]]] = mapped_column(
-        MutableList.as_mutable(JSON), default=list
+        NestedMutableList.as_mutable(JSON), default=list
     )
 
     project: Mapped[Project] = relationship(back_populates="templates")
