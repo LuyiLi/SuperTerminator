@@ -6,6 +6,7 @@ from app.config import load_settings
 from app.db import init_db
 from app.ui.components import empty_state
 from app.ui.dashboard import render_dashboard_page
+from app.ui.projects import render_project_detail, render_projects_page
 from app.ui.layout import app_frame
 from app.ui.servers import render_servers_page
 
@@ -20,7 +21,12 @@ def home_page() -> None:
 
 @ui.page("/projects")
 def projects_page() -> None:
-    app_frame("Projects", lambda: empty_state("Projects will appear here."))
+    app_frame("Projects", render_projects_page)
+
+
+@ui.page("/projects/{project_id}")
+def project_detail_page(project_id: int) -> None:
+    app_frame("Project", lambda: render_project_detail(int(project_id)))
 
 
 @ui.page("/runs")

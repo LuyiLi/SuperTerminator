@@ -111,21 +111,28 @@ def test_pages_use_app_frame_and_configured_content(monkeypatch):
 
     main_module.home_page()
     main_module.projects_page()
+    main_module.project_detail_page("42")
     main_module.runs_page()
     main_module.servers_page()
 
     assert captured == [
         ("Home", main_module.render_dashboard_page),
-        ("Projects", captured[1][1]),
-        ("Runs", captured[2][1]),
+        ("Projects", main_module.render_projects_page),
+        ("Project", captured[2][1]),
+        ("Runs", captured[3][1]),
         ("Servers", main_module.render_servers_page),
     ]
 
     messages = []
+    detail_calls = []
     monkeypatch.setattr(main_module, "empty_state", lambda message: messages.append(message))
-    captured[1][1]()
+    monkeypatch.setattr(
+        main_module, "render_project_detail", lambda project_id: detail_calls.append(project_id)
+    )
     captured[2][1]()
-    assert messages == ["Projects will appear here.", "Runs will appear here."]
+    captured[3][1]()
+    assert detail_calls == [42]
+    assert messages == ["Runs will appear here."]
 
 
 def test_main_initializes_database_and_runs_nicegui_with_settings(monkeypatch):
