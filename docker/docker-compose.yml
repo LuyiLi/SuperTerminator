@@ -4,10 +4,10 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8090:8090"
     environment:
       GPU_SSH_PANEL_HOST: 0.0.0.0
-      GPU_SSH_PANEL_PORT: 8080
+      GPU_SSH_PANEL_PORT: 8090
       GPU_SSH_PANEL_DB_PATH: /app/data/app.db
     volumes:
       - ../data:/app/data

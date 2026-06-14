@@ -21,7 +21,7 @@ def _bool_env(name: str, default: bool) -> bool:
 class Settings:
     db_path: Path = ROOT_DIR / "data" / "app.db"
     host: str = "127.0.0.1"
-    port: int = 8080
+    port: int = 8090
     reload: bool = False
     refresh_seconds: int = 15
     run_output_seconds: int = 3
@@ -33,7 +33,7 @@ def load_settings() -> Settings:
     return Settings(
         db_path=Path(os.getenv("GPU_SSH_PANEL_DB_PATH", str(ROOT_DIR / "data" / "app.db"))),
         host=os.getenv("GPU_SSH_PANEL_HOST", "127.0.0.1"),
-        port=int(os.getenv("GPU_SSH_PANEL_PORT", "8080")),
+        port=int(os.getenv("GPU_SSH_PANEL_PORT", "8090")),
         reload=_bool_env("GPU_SSH_PANEL_RELOAD", False),
         refresh_seconds=int(os.getenv("GPU_SSH_PANEL_REFRESH_SECONDS", "15")),
         run_output_seconds=int(os.getenv("GPU_SSH_PANEL_RUN_OUTPUT_SECONDS", "3")),

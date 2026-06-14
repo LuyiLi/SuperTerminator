@@ -8,7 +8,7 @@ Type=simple
 WorkingDirectory=%h/.local/share/gpu-ssh-panel
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=GPU_SSH_PANEL_HOST=127.0.0.1
-Environment=GPU_SSH_PANEL_PORT=8080
+Environment=GPU_SSH_PANEL_PORT=8090
 ExecStart=/usr/bin/env uv run python -m app.main
 Restart=always
 RestartSec=5
