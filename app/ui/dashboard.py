@@ -173,7 +173,7 @@ def render_thin_usage_bar(percent: Any) -> None:
         _progress_value(percent),
         color=percent_color(percent),
         show_value=False,
-    ).classes("w-full h-1 rounded-full border border-grey-7")
+    ).classes("w-full h-2 rounded-full bg-grey-7")
 
 
 def render_gpu_panel(status: ServerStatus) -> None:
@@ -205,10 +205,12 @@ def _render_cpu(status: ServerStatus) -> None:
             return
         value = parse_percent_value(status.cpu_percent)
         with ui.row().classes("items-center gap-3"):
-            ui.circular_progress(_progress_value(value), color=percent_color(value)).props("size=72px")
-            with ui.column().classes("w-full gap-1"):
-                ui.label(f"{format_percent(value)} used").classes("text-lg font-semibold")
-                render_thin_usage_bar(value)
+            with ui.circular_progress(
+                _progress_value(value),
+                color=percent_color(value),
+                show_value=False,
+            ).props("size=72px"):
+                ui.label(format_percent(value)).classes("absolute-center text-sm font-bold")
 
 
 def _render_memory(status: ServerStatus) -> None:

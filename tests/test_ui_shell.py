@@ -399,9 +399,79 @@ def test_dashboard_thin_usage_bar_hides_value_text(monkeypatch):
     assert calls[0][0] == "linear_progress"
     assert calls[0][2]["show_value"] is False
     assert any(
-        call[0] == "classes" and "border" in call[1] and "border-grey-7" in call[1]
+        call[0] == "classes" and "h-2" in call[1] and "bg-grey-7" in call[1]
         for call in calls
     )
+    assert not any(
+        call[0] == "classes" and "border" in call[1]
+        for call in calls
+    )
+
+
+def test_dashboard_cpu_panel_uses_circle_value_without_outer_minibar(monkeypatch):
+    from app.schemas import ServerStatus
+    from app.ui import dashboard
+
+    calls = []
+
+    class FakeNode:
+        def __init__(self, kind):
+            self.kind = kind
+
+        def __enter__(self):
+            calls.append((f"enter:{self.kind}", (), {}))
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            calls.append((f"exit:{self.kind}", (), {}))
+            return False
+
+        def classes(self, value):
+            calls.append((f"classes:{self.kind}", (value,), {}))
+            return self
+
+        def props(self, value):
+            calls.append((f"props:{self.kind}", (value,), {}))
+            return self
+
+    class FakeUI:
+        def card(self):
+            calls.append(("card", (), {}))
+            return FakeNode("card")
+
+        def label(self, text):
+            calls.append(("label", (text,), {}))
+            return FakeNode("label")
+
+        def row(self):
+            calls.append(("row", (), {}))
+            return FakeNode("row")
+
+        def column(self):
+            calls.append(("column", (), {}))
+            return FakeNode("column")
+
+        def circular_progress(self, *args, **kwargs):
+            calls.append(("circular_progress", args, kwargs))
+            return FakeNode("circular_progress")
+
+        def linear_progress(self, *args, **kwargs):
+            calls.append(("linear_progress", args, kwargs))
+            return FakeNode("linear_progress")
+
+    monkeypatch.setattr(dashboard, "ui", FakeUI())
+
+    dashboard._render_cpu(ServerStatus(alias="gpu01", online=True, cpu_percent=42))
+
+    assert any(call[0] == "label" and call[1][0] == "CPU" for call in calls)
+    assert any(call[0] == "circular_progress" and call[2].get("show_value") is False for call in calls)
+    assert any(
+        call[0] == "props:circular_progress" and "size=72px" in call[1][0]
+        for call in calls
+    )
+    assert any(call[0] == "label" and call[1][0] == "42%" for call in calls)
+    assert not any(call[0] == "label" and "42% used" in call[1][0] for call in calls)
+    assert not any(call[0] == "linear_progress" for call in calls)
 
 
 def test_layout_sidebar_has_brand_icons_and_active_state(monkeypatch):
