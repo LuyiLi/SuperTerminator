@@ -369,3 +369,26 @@ def test_dashboard_summary_includes_ram_percent_and_expansion_state():
     assert dashboard.is_server_expanded("gpu01") is True
     dashboard.set_server_expanded("gpu01", False)
     assert dashboard.is_server_expanded("gpu01") is False
+
+
+def test_dashboard_thin_usage_bar_hides_value_text(monkeypatch):
+    from app.ui import dashboard
+
+    calls = []
+
+    class FakeProgress:
+        def classes(self, value):
+            calls.append(("classes", value))
+            return self
+
+    class FakeUI:
+        def linear_progress(self, *args, **kwargs):
+            calls.append(("linear_progress", args, kwargs))
+            return FakeProgress()
+
+    monkeypatch.setattr(dashboard, "ui", FakeUI())
+
+    dashboard.render_thin_usage_bar(42)
+
+    assert calls[0][0] == "linear_progress"
+    assert calls[0][2]["show_value"] is False

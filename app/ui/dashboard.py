@@ -169,9 +169,11 @@ def render_metric_bar(label: str, detail: str, percent: Any) -> None:
 
 
 def render_thin_usage_bar(percent: Any) -> None:
-    ui.linear_progress(_progress_value(percent), color=percent_color(percent)).classes(
-        "w-full h-1 rounded-full"
-    )
+    ui.linear_progress(
+        _progress_value(percent),
+        color=percent_color(percent),
+        show_value=False,
+    ).classes("w-full h-1 rounded-full")
 
 
 def render_gpu_panel(status: ServerStatus) -> None:
