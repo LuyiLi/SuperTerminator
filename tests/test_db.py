@@ -170,3 +170,54 @@ def test_project_workdir_allows_only_one_default_per_project_server(tmp_path: Pa
     with pytest.raises(IntegrityError):
         with session_scope(engine) as session:
             session.add(ProjectWorkdir(project_server_id=link_id, path="/data/two", label="two", is_default=True))
+
+
+def test_init_db_migrates_existing_project_workdir_default_index(tmp_path: Path):
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import ProjectWorkdir
+
+    db_path = tmp_path / "legacy.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with legacy_engine.begin() as conn:
+        conn.execute(text("CREATE TABLE project_servers (id INTEGER PRIMARY KEY)"))
+        conn.execute(
+            text(
+                "CREATE TABLE project_workdirs ("
+                "id INTEGER PRIMARY KEY, "
+                "project_server_id INTEGER, "
+                "path VARCHAR(1024), "
+                "label VARCHAR(255), "
+                "is_default BOOLEAN)"
+            )
+        )
+        conn.execute(text("INSERT INTO project_servers (id) VALUES (1)"))
+        conn.execute(
+            text(
+                "INSERT INTO project_workdirs "
+                "(id, project_server_id, path, label, is_default) VALUES "
+                "(1, 1, '/data/one', 'one', 1), "
+                "(2, 1, '/data/two', 'two', 1)"
+            )
+        )
+    legacy_engine.dispose()
+
+    engine = create_engine_for_settings(Settings(db_path=db_path))
+    init_db(engine)
+
+    with engine.connect() as conn:
+        indexes = [row[1] for row in conn.execute(text("PRAGMA index_list('project_workdirs')"))]
+        defaults = conn.execute(
+            text(
+                "SELECT id, is_default FROM project_workdirs "
+                "WHERE project_server_id = 1 ORDER BY id"
+            )
+        ).all()
+
+    assert "ix_project_workdirs_one_default" in indexes
+    assert defaults == [(1, 0), (2, 1)]
+
+    with pytest.raises(IntegrityError):
+        with session_scope(engine) as session:
+            session.add(ProjectWorkdir(project_server_id=1, path="/data/three", label="three", is_default=True))
