@@ -267,3 +267,66 @@ def test_dashboard_refresh_guard_marks_older_generations_stale():
     assert older < newer
     assert guard.is_current(older) is False
     assert guard.is_current(newer) is True
+
+
+def test_dashboard_visual_format_helpers():
+    from app.ui import dashboard
+
+    assert dashboard.percent_color(10) == "positive"
+    assert dashboard.percent_color(70) == "warning"
+    assert dashboard.percent_color(95) == "negative"
+    assert dashboard.ratio_percent(25, 100) == 25.0
+    assert dashboard.ratio_percent(1, 0) == 0.0
+    assert dashboard.format_mib(81920) == "80.0 GiB"
+    assert dashboard.format_kib(1048576) == "1.0 GiB"
+    assert dashboard.parse_percent_value("46%") == 46.0
+
+
+def test_dashboard_uses_two_column_grid_classes(monkeypatch):
+    from app.ui import dashboard
+
+    created = []
+
+    class FakeElement:
+        def __init__(self, kind):
+            self.kind = kind
+            created.append((kind, None))
+
+        def classes(self, value):
+            created.append((f"classes:{self.kind}", value))
+            return self
+
+        def clear(self):
+            created.append((f"clear:{self.kind}", None))
+
+        def props(self, value):
+            created.append((f"props:{self.kind}", value))
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeUI:
+        def label(self, *_args, **_kwargs):
+            return FakeElement("label")
+
+        def button(self, *_args, **_kwargs):
+            return FakeElement("button")
+
+        def timer(self, *_args, **_kwargs):
+            return FakeElement("timer")
+
+        def column(self):
+            return FakeElement("column")
+
+        def row(self):
+            return FakeElement("row")
+
+    monkeypatch.setattr(dashboard, "ui", FakeUI())
+
+    dashboard.render_dashboard_page()
+
+    assert ("classes:column", "w-full grid grid-cols-1 lg:grid-cols-2 gap-4") in created
