@@ -53,7 +53,13 @@ class FakeUI:
     def label(self, text: str):
         return FakeElement(self.calls, "label", text)
 
-    def link(self, text: str, target: str):
+    def icon(self, name: str):
+        return FakeElement(self.calls, "icon", name)
+
+    def row(self):
+        return FakeElement(self.calls, "row")
+
+    def link(self, text: str | None = None, target: str | None = None):
         return FakeElement(self.calls, "link", text, target)
 
 
@@ -69,15 +75,15 @@ def test_app_frame_sets_title_navigation_and_invokes_content(monkeypatch):
     assert ("page_title", ("gpu-ssh-panel",), {}) in fake_ui.calls
     assert ("label", ("gpu-ssh-panel",), {}) in fake_ui.calls
     assert ("label", ("Projects",), {}) in fake_ui.calls
-    assert ("classes:header", ("items-center",), {}) in fake_ui.calls
+    assert any(call[0] == "classes:header" and "bg-white" in call[1][0] for call in fake_ui.calls)
     assert ("classes:label", ("text-lg font-bold",), {}) in fake_ui.calls
     assert ("classes:label", ("text-sm opacity-70",), {}) in fake_ui.calls
     assert ("left_drawer", (), {"value": True}) in fake_ui.calls
-    assert ("classes:left_drawer", ("bg-grey-1",), {}) in fake_ui.calls
-    assert ("classes:link", ("block p-2",), {}) in fake_ui.calls
+    assert any(call[0] == "classes:left_drawer" and "bg-grey-1" in call[1][0] for call in fake_ui.calls)
+    assert any(call[0] == "classes:link" and "rounded-xl" in call[1][0] for call in fake_ui.calls)
     assert ("classes:column", ("w-full p-4 gap-4",), {}) in fake_ui.calls
     assert [call for call in fake_ui.calls if call[0] == "link"] == [
-        ("link", (label, target), {}) for label, target in layout.NAV_ITEMS
+        ("link", (None, target), {}) for _label, target, _icon in layout.NAV_ITEMS
     ]
     assert rendered == ["content"]
 
@@ -392,3 +398,22 @@ def test_dashboard_thin_usage_bar_hides_value_text(monkeypatch):
 
     assert calls[0][0] == "linear_progress"
     assert calls[0][2]["show_value"] is False
+
+
+def test_layout_sidebar_has_brand_icons_and_active_state(monkeypatch):
+    from app.ui import layout
+
+    fake_ui = FakeUI()
+    monkeypatch.setattr(layout, "ui", fake_ui)
+    monkeypatch.setattr(layout, "_current_path", lambda: "/projects/42")
+
+    layout.app_frame("Projects", lambda: None)
+
+    labels = [call[1][0] for call in fake_ui.calls if call[0] == "label"]
+    assert "GPU SSH Panel" in labels
+    assert "Local SuperTerminal" in labels
+    assert any(call[0] == "icon" and call[1][0] == "folder_open" for call in fake_ui.calls)
+    assert any(
+        call[0] == "classes:link" and "bg-primary" in call[1][0]
+        for call in fake_ui.calls
+    )
