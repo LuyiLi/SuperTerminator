@@ -83,9 +83,9 @@ def percent_color(percent: Any) -> str:
 
 def percent_track_class(percent: Any) -> str:
     track_classes = {
-        "positive": "bg-green-3",
-        "warning": "bg-amber-3",
-        "negative": "bg-red-3",
+        "positive": "bg-green-2",
+        "warning": "bg-amber-2",
+        "negative": "bg-red-2",
     }
     return track_classes[percent_color(percent)]
 

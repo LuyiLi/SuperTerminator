@@ -281,9 +281,9 @@ def test_dashboard_visual_format_helpers():
     assert dashboard.percent_color(10) == "positive"
     assert dashboard.percent_color(70) == "warning"
     assert dashboard.percent_color(95) == "negative"
-    assert dashboard.percent_track_class(10) == "bg-green-3"
-    assert dashboard.percent_track_class(70) == "bg-amber-3"
-    assert dashboard.percent_track_class(95) == "bg-red-3"
+    assert dashboard.percent_track_class(10) == "bg-green-2"
+    assert dashboard.percent_track_class(70) == "bg-amber-2"
+    assert dashboard.percent_track_class(95) == "bg-red-2"
     assert dashboard.ratio_percent(25, 100) == 25.0
     assert dashboard.ratio_percent(1, 0) == 0.0
     assert dashboard.format_mib(81920) == "80.0 GiB"
@@ -403,7 +403,7 @@ def test_dashboard_thin_usage_bar_hides_value_text(monkeypatch):
     assert calls[0][2]["color"] == "positive"
     assert calls[0][2]["show_value"] is False
     assert any(
-        call[0] == "classes" and "h-2" in call[1] and "bg-green-3" in call[1]
+        call[0] == "classes" and "h-2" in call[1] and "bg-green-2" in call[1]
         for call in calls
     )
     assert not any(
