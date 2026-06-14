@@ -350,3 +350,22 @@ def test_dashboard_summary_helpers_format_clean_integer_percentages():
     assert dashboard.gpu_average_utilization(status) == 50.0
     assert dashboard.format_percent(dashboard.gpu_average_utilization(status)) == "50%"
     assert dashboard.format_percent(status.cpu_percent) == "48%"
+
+
+def test_dashboard_summary_includes_ram_percent_and_expansion_state():
+    from app.schemas import ServerStatus
+    from app.ui import dashboard
+
+    status = ServerStatus(
+        alias="gpu01",
+        online=True,
+        memory={"total_kib": 2000, "available_kib": 500, "used_percent": 75.000000000004},
+    )
+
+    assert dashboard.memory_used_percent(status) == 75.0
+    assert dashboard.format_percent(dashboard.memory_used_percent(status)) == "75%"
+
+    dashboard.set_server_expanded("gpu01", True)
+    assert dashboard.is_server_expanded("gpu01") is True
+    dashboard.set_server_expanded("gpu01", False)
+    assert dashboard.is_server_expanded("gpu01") is False

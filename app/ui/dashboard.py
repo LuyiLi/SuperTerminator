@@ -15,6 +15,7 @@ from app.ssh_client import SSHClient
 from app.visual_actions import collect_server_status
 
 settings = load_settings()
+_expanded_servers: set[str] = set()
 
 
 class DashboardRefreshGuard:
@@ -94,6 +95,27 @@ def gpu_average_utilization(status: ServerStatus) -> float:
     return round(sum(values) / len(values), 1)
 
 
+def memory_used_percent(status: ServerStatus) -> float:
+    memory = status.memory
+    if memory is None:
+        return 0.0
+    total = float(_mapping_value(memory, "total_kib", 0) or 0)
+    available = float(_mapping_value(memory, "available_kib", 0) or 0)
+    fallback = ratio_percent(max(total - available, 0), total)
+    return round(parse_percent_value(_mapping_value(memory, "used_percent", fallback)), 1)
+
+
+def set_server_expanded(alias: str, expanded: bool) -> None:
+    if expanded:
+        _expanded_servers.add(alias)
+    else:
+        _expanded_servers.discard(alias)
+
+
+def is_server_expanded(alias: str) -> bool:
+    return alias in _expanded_servers
+
+
 def format_mib(value: Any) -> str:
     try:
         mib = float(value)
@@ -119,13 +141,31 @@ def _progress_value(percent: Any) -> float:
     return parse_percent_value(percent) / 100.0
 
 
-def render_metric_bar(label: str, detail: str, percent: Any) -> None:
+def render_labeled_bar(text: str, percent: Any) -> None:
     value = parse_percent_value(percent)
-    with ui.column().classes("w-full gap-1"):
-        with ui.row().classes("items-center justify-between w-full text-sm"):
-            ui.label(label).classes("font-medium")
-            ui.label(f"{detail} · {format_percent(value)}").classes("text-grey-7")
-        ui.linear_progress(_progress_value(value), color=percent_color(value)).classes("w-full")
+    color_classes = {
+        "positive": "bg-positive",
+        "warning": "bg-warning",
+        "negative": "bg-negative",
+    }
+    color_class = color_classes[percent_color(value)]
+    with ui.element("div").classes(
+        "relative w-full h-6 overflow-hidden rounded bg-grey-3 border border-grey-4"
+    ):
+        ui.label(text).classes(
+            "absolute inset-0 flex items-center justify-center text-xs font-semibold text-black z-10"
+        )
+        inner_text_width = 10000 / value if value > 0 else 100
+        with ui.element("div").classes(
+            f"absolute inset-y-0 left-0 overflow-hidden {color_class} z-20"
+        ).style(f"width: {value:.0f}%"):
+            ui.label(text).classes(
+                "absolute inset-y-0 left-0 flex items-center justify-center text-xs font-semibold text-white"
+            ).style(f"width: {inner_text_width:.4f}%")
+
+
+def render_metric_bar(label: str, detail: str, percent: Any) -> None:
+    render_labeled_bar(f"{label} {detail} {format_percent(percent)}", percent)
 
 
 def render_thin_usage_bar(percent: Any) -> None:
@@ -207,6 +247,7 @@ def render_system_panel(status: ServerStatus) -> None:
 def render_collapsed_summary(status: ServerStatus) -> None:
     gpu_average = gpu_average_utilization(status)
     cpu_percent = status.cpu_percent if status.cpu_percent is not None else 0
+    ram_percent = memory_used_percent(status)
 
     with ui.grid(columns=2).classes("w-full grid-cols-2 gap-4"):
         with ui.column().classes("w-full gap-2"):
@@ -214,7 +255,7 @@ def render_collapsed_summary(status: ServerStatus) -> None:
                 ui.label("GPU").classes("text-xs uppercase text-grey-6")
                 ui.label(format_percent(gpu_average)).classes("text-lg font-bold")
             if status.gpu:
-                with ui.row().classes("items-end gap-1 w-full"):
+                with ui.grid(columns=2).classes("w-full grid-cols-2 gap-1"):
                     for gpu in status.gpu:
                         render_thin_usage_bar(_mapping_value(gpu, "utilization_gpu_percent", 0))
             else:
@@ -225,6 +266,10 @@ def render_collapsed_summary(status: ServerStatus) -> None:
                 ui.label("CPU").classes("text-xs uppercase text-grey-6")
                 ui.label(format_percent(cpu_percent)).classes("text-lg font-bold")
             render_thin_usage_bar(cpu_percent)
+            with ui.row().classes("items-baseline justify-between w-full"):
+                ui.label("RAM").classes("text-xs uppercase text-grey-6")
+                ui.label(format_percent(ram_percent)).classes("text-sm font-semibold")
+            render_thin_usage_bar(ram_percent)
 
 
 def render_server_card(status: ServerStatus) -> None:
@@ -237,7 +282,11 @@ def render_server_card(status: ServerStatus) -> None:
         card_classes += " bg-red-1"
 
     with ui.card().classes(card_classes):
-        expansion = ui.expansion(value=False).classes("w-full")
+        expansion = ui.expansion(value=is_server_expanded(status.alias)).classes("w-full")
+        expansion.on(
+            "update:model-value",
+            lambda event, alias=status.alias: set_server_expanded(alias, bool(event.args)),
+        )
         with expansion.add_slot("header"):
             with ui.column().classes("w-full gap-3 cursor-pointer"):
                 with ui.row().classes("items-start justify-between w-full gap-3"):
