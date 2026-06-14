@@ -28,7 +28,7 @@ def _is_active(target: str, current_path: str) -> bool:
 
 
 def _nav_link_classes(active: bool) -> str:
-    base = "flex items-center gap-3 px-3 py-2 rounded-xl no-underline transition-all"
+    base = "flex items-center gap-3 px-3 py-2 rounded-xl no-underline"
     if active:
         return f"{base} bg-primary text-white shadow-sm"
     return f"{base} text-grey-8 hover:bg-blue-1 hover:text-primary"
@@ -44,7 +44,7 @@ def app_frame(title: str, content: Callable[[], None]) -> None:
         ui.label(title).classes("text-sm opacity-70")
 
     current_path = _current_path()
-    with ui.left_drawer(value=True).classes("bg-grey-1 border-r border-grey-3"):
+    with ui.left_drawer(value=True).props("no-swipe-open no-swipe-close no-swipe-backdrop").classes("bg-grey-1 border-r border-grey-3"):
         with ui.column().classes("w-full h-full gap-4 p-3"):
             with ui.card().classes("w-full bg-grey-10 text-white shadow-none rounded-2xl p-4"):
                 with ui.row().classes("items-center gap-3"):

@@ -30,6 +30,10 @@ class FakeElement:
         self.recorder.append((f"classes:{self.kind}", (value,), {}))
         return self
 
+    def props(self, value: str):
+        self.recorder.append((f"props:{self.kind}", (value,), {}))
+        return self
+
 
 class FakeUI:
     def __init__(self):
@@ -79,8 +83,13 @@ def test_app_frame_sets_title_navigation_and_invokes_content(monkeypatch):
     assert ("classes:label", ("text-lg font-bold",), {}) in fake_ui.calls
     assert ("classes:label", ("text-sm opacity-70",), {}) in fake_ui.calls
     assert ("left_drawer", (), {"value": True}) in fake_ui.calls
+    assert any(
+        call[0] == "props:left_drawer" and "no-swipe-open" in call[1][0] and "no-swipe-close" in call[1][0]
+        for call in fake_ui.calls
+    )
     assert any(call[0] == "classes:left_drawer" and "bg-grey-1" in call[1][0] for call in fake_ui.calls)
     assert any(call[0] == "classes:link" and "rounded-xl" in call[1][0] for call in fake_ui.calls)
+    assert not any(call[0] == "classes:link" and "transition" in call[1][0] for call in fake_ui.calls)
     assert ("classes:column", ("w-full p-4 gap-4",), {}) in fake_ui.calls
     assert [call for call in fake_ui.calls if call[0] == "link"] == [
         ("link", (None, target), {}) for _label, target, _icon in layout.NAV_ITEMS
@@ -325,7 +334,8 @@ def test_dashboard_uses_two_column_grid_classes(monkeypatch):
         def button(self, *_args, **_kwargs):
             return FakeElement("button")
 
-        def timer(self, *_args, **_kwargs):
+        def timer(self, *args, **kwargs):
+            created.append(("timer_args", args, kwargs))
             return FakeElement("timer")
 
         def column(self):
@@ -339,6 +349,10 @@ def test_dashboard_uses_two_column_grid_classes(monkeypatch):
     dashboard.render_dashboard_page()
 
     assert ("classes:column", "w-full grid grid-cols-1 lg:grid-cols-2 gap-4") in created
+    timers = [item for item in created if item[0] == "timer_args"]
+    assert timers[0][1][0] == dashboard.settings.refresh_seconds
+    assert timers[1][1][0] == 0
+    assert timers[1][2]["once"] is True
 
 
 def test_dashboard_summary_helpers_format_clean_integer_percentages():

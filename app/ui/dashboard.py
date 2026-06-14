@@ -368,4 +368,4 @@ def render_dashboard_page() -> None:
 
     ui.button("Refresh now", on_click=refresh).props("icon=refresh")
     ui.timer(settings.refresh_seconds, refresh)
-    ui.timer(0.1, refresh, once=True)
+    ui.timer(0, refresh, once=True)
