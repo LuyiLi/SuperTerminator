@@ -81,6 +81,15 @@ def percent_color(percent: Any) -> str:
     return "positive"
 
 
+def percent_track_class(percent: Any) -> str:
+    track_classes = {
+        "positive": "bg-green-1",
+        "warning": "bg-amber-1",
+        "negative": "bg-red-1",
+    }
+    return track_classes[percent_color(percent)]
+
+
 def format_percent(percent: Any) -> str:
     return f"{parse_percent_value(percent):.0f}%"
 
@@ -173,7 +182,7 @@ def render_thin_usage_bar(percent: Any) -> None:
         _progress_value(percent),
         color=percent_color(percent),
         show_value=False,
-    ).classes("w-full h-2 rounded-full bg-grey-7")
+    ).classes(f"w-full h-2 rounded-full {percent_track_class(percent)}")
 
 
 def render_gpu_panel(status: ServerStatus) -> None:
