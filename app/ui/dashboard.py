@@ -80,6 +80,20 @@ def percent_color(percent: Any) -> str:
     return "positive"
 
 
+def format_percent(percent: Any) -> str:
+    return f"{parse_percent_value(percent):.0f}%"
+
+
+def gpu_average_utilization(status: ServerStatus) -> float:
+    if not status.gpu:
+        return 0.0
+    values = [
+        parse_percent_value(_mapping_value(gpu, "utilization_gpu_percent", 0))
+        for gpu in status.gpu
+    ]
+    return round(sum(values) / len(values), 1)
+
+
 def format_mib(value: Any) -> str:
     try:
         mib = float(value)
@@ -110,8 +124,14 @@ def render_metric_bar(label: str, detail: str, percent: Any) -> None:
     with ui.column().classes("w-full gap-1"):
         with ui.row().classes("items-center justify-between w-full text-sm"):
             ui.label(label).classes("font-medium")
-            ui.label(f"{detail} · {value:.0f}%").classes("text-grey-7")
+            ui.label(f"{detail} · {format_percent(value)}").classes("text-grey-7")
         ui.linear_progress(_progress_value(value), color=percent_color(value)).classes("w-full")
+
+
+def render_thin_usage_bar(percent: Any) -> None:
+    ui.linear_progress(_progress_value(percent), color=percent_color(percent)).classes(
+        "w-full h-1 rounded-full"
+    )
 
 
 def render_gpu_panel(status: ServerStatus) -> None:
@@ -128,8 +148,11 @@ def render_gpu_panel(status: ServerStatus) -> None:
             mem_percent = ratio_percent(used, total)
             with ui.card().classes("w-full bg-grey-1 shadow-none border border-grey-3"):
                 ui.label(f"GPU {index} · {name}").classes("font-medium")
-                render_metric_bar("Util", "active", util)
-                render_metric_bar("Memory", f"{format_mib(used)} / {format_mib(total)}", mem_percent)
+                with ui.grid(columns=2).classes("w-full grid-cols-1 sm:grid-cols-2 gap-3"):
+                    render_metric_bar("Util", "active", util)
+                    render_metric_bar(
+                        "Memory", f"{format_mib(used)} / {format_mib(total)}", mem_percent
+                    )
 
 
 def _render_cpu(status: ServerStatus) -> None:
@@ -140,10 +163,10 @@ def _render_cpu(status: ServerStatus) -> None:
             return
         value = parse_percent_value(status.cpu_percent)
         with ui.row().classes("items-center gap-3"):
-            ui.circular_progress(_progress_value(value), color=percent_color(value), show_value=True).props(
-                "size=72px"
-            )
-            ui.label(f"{value:.0f}% used").classes("text-lg font-semibold")
+            ui.circular_progress(_progress_value(value), color=percent_color(value)).props("size=72px")
+            with ui.column().classes("w-full gap-1"):
+                ui.label(f"{format_percent(value)} used").classes("text-lg font-semibold")
+                render_thin_usage_bar(value)
 
 
 def _render_memory(status: ServerStatus) -> None:
@@ -181,6 +204,29 @@ def render_system_panel(status: ServerStatus) -> None:
             _render_disks(status)
 
 
+def render_collapsed_summary(status: ServerStatus) -> None:
+    gpu_average = gpu_average_utilization(status)
+    cpu_percent = status.cpu_percent if status.cpu_percent is not None else 0
+
+    with ui.grid(columns=2).classes("w-full grid-cols-2 gap-4"):
+        with ui.column().classes("w-full gap-2"):
+            with ui.row().classes("items-baseline justify-between w-full"):
+                ui.label("GPU").classes("text-xs uppercase text-grey-6")
+                ui.label(format_percent(gpu_average)).classes("text-lg font-bold")
+            if status.gpu:
+                with ui.row().classes("items-end gap-1 w-full"):
+                    for gpu in status.gpu:
+                        render_thin_usage_bar(_mapping_value(gpu, "utilization_gpu_percent", 0))
+            else:
+                render_thin_usage_bar(0)
+
+        with ui.column().classes("w-full gap-2"):
+            with ui.row().classes("items-baseline justify-between w-full"):
+                ui.label("CPU").classes("text-xs uppercase text-grey-6")
+                ui.label(format_percent(cpu_percent)).classes("text-lg font-bold")
+            render_thin_usage_bar(cpu_percent)
+
+
 def render_server_card(status: ServerStatus) -> None:
     state = "online" if status.online else "offline"
     badge_color = "positive" if status.online else "negative"
@@ -191,19 +237,26 @@ def render_server_card(status: ServerStatus) -> None:
         card_classes += " bg-red-1"
 
     with ui.card().classes(card_classes):
-        with ui.row().classes("items-start justify-between w-full gap-3"):
-            with ui.column().classes("gap-1"):
-                ui.label(status.alias).classes("text-xl font-bold")
-                if status.hostname:
-                    ui.label(f"hostname: {status.hostname}").classes("text-grey-7")
-            ui.badge(state, color=badge_color).classes("uppercase")
+        expansion = ui.expansion(value=False).classes("w-full")
+        with expansion.add_slot("header"):
+            with ui.column().classes("w-full gap-3 cursor-pointer"):
+                with ui.row().classes("items-start justify-between w-full gap-3"):
+                    with ui.column().classes("gap-1"):
+                        ui.label(status.alias).classes("text-xl font-bold")
+                        if status.hostname:
+                            ui.label(f"hostname: {status.hostname}").classes("text-grey-7")
+                    with ui.row().classes("items-center gap-2"):
+                        ui.badge(state, color=badge_color).classes("uppercase")
+                        ui.icon("expand_more").classes("text-grey-6")
+                render_collapsed_summary(status)
 
-        if status.error:
-            ui.label(status.error).classes("text-negative font-medium")
+        with expansion:
+            if status.error:
+                ui.label(status.error).classes("text-negative font-medium")
 
-        with ui.grid(columns=2).classes("w-full grid-cols-1 xl:grid-cols-2 gap-4"):
-            render_gpu_panel(status)
-            render_system_panel(status)
+            with ui.grid(columns=2).classes("w-full grid-cols-1 xl:grid-cols-2 gap-4"):
+                render_gpu_panel(status)
+                render_system_panel(status)
 
 
 def render_dashboard_page() -> None:

@@ -330,3 +330,23 @@ def test_dashboard_uses_two_column_grid_classes(monkeypatch):
     dashboard.render_dashboard_page()
 
     assert ("classes:column", "w-full grid grid-cols-1 lg:grid-cols-2 gap-4") in created
+
+
+def test_dashboard_summary_helpers_format_clean_integer_percentages():
+    from app.schemas import ServerStatus
+    from app.ui import dashboard
+
+    status = ServerStatus(
+        alias="gpu01",
+        online=True,
+        gpu=[
+            {"utilization_gpu_percent": 33.333333333333336},
+            {"utilization_gpu_percent": 66.66666666666667},
+        ],
+        cpu_percent=48.000000000000004,
+    )
+
+    assert dashboard.format_percent(72.00000000004) == "72%"
+    assert dashboard.gpu_average_utilization(status) == 50.0
+    assert dashboard.format_percent(dashboard.gpu_average_utilization(status)) == "50%"
+    assert dashboard.format_percent(status.cpu_percent) == "48%"
