@@ -109,6 +109,9 @@ def link_server_to_project(
                 .filter_by(project_server_id=link.id, path=clean_workdir)
                 .one_or_none()
             )
+            for workdir in session.query(ProjectWorkdir).filter_by(project_server_id=link.id):
+                workdir.is_default = False
+            session.flush()
             if existing is None:
                 session.add(
                     ProjectWorkdir(
@@ -118,6 +121,9 @@ def link_server_to_project(
                         is_default=True,
                     )
                 )
+            else:
+                existing.label = existing.label or "default"
+                existing.is_default = True
         link_id = link.id
 
     _notify("Server linked to project.", type="positive")
@@ -143,6 +149,7 @@ def add_project_workdir(
         if is_default:
             for workdir in session.query(ProjectWorkdir).filter_by(project_server_id=project_server_id):
                 workdir.is_default = False
+            session.flush()
         workdir = ProjectWorkdir(
             project_server_id=project_server_id,
             path=clean_path,

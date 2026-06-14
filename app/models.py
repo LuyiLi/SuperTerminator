@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -142,6 +142,14 @@ class ProjectWorkdir(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
 
     project_server: Mapped[ProjectServer] = relationship(back_populates="workdirs")
+
+
+Index(
+    "ix_project_workdirs_one_default",
+    ProjectWorkdir.project_server_id,
+    unique=True,
+    sqlite_where=ProjectWorkdir.is_default.is_(True),
+)
 
 
 class Template(TimestampMixin, Base):

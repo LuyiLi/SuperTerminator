@@ -91,7 +91,7 @@ async def test_refresh_run_output_does_not_overwrite_with_stale_result():
 
     guard = runs.RunOutputRefreshGuard()
     output = SimpleNamespace(value="")
-    run = {"server_alias": "gpu01", "tmux_session": "session-a"}
+    run = {"id": 123, "server_alias": "gpu01", "tmux_session": "session-a"}
     first_capture_started = asyncio.Event()
     first_capture_can_finish = asyncio.Event()
     second_capture_can_finish = asyncio.Event()

@@ -87,6 +87,18 @@ def _mark_run_unknown(engine: Engine, run_id: int) -> None:
             stored.status = "unknown"
 
 
+def mark_run_exited(engine: Engine, run_id: int) -> bool:
+    """Persist that a run's tmux session has ended or disappeared."""
+
+    with session_scope(engine) as session:
+        stored = session.get(Run, run_id)
+        if stored is None:
+            return False
+        stored.status = "exited"
+        stored.ended_at = datetime.now()
+        return True
+
+
 async def launch_run(
     *,
     engine: Engine,
@@ -178,7 +190,15 @@ async def launch_run(
         return stored
 
 
-async def capture_run_output(alias: str, session_name: str, ssh_client, lines: int = 300) -> str:
+async def capture_run_output(
+    alias: str,
+    session_name: str,
+    ssh_client,
+    lines: int = 300,
+    *,
+    engine: Engine | None = None,
+    run_id: int | None = None,
+) -> str:
     """Capture recent output from a tmux run session."""
     result = await ssh_client.run(
         alias,
@@ -186,6 +206,8 @@ async def capture_run_output(alias: str, session_name: str, ssh_client, lines: i
         timeout=10,
     )
     if result.exit_status != 0:
+        if engine is not None and run_id is not None:
+            mark_run_exited(engine, run_id)
         return result.stderr.strip() or "tmux session not found"
     return result.stdout
 

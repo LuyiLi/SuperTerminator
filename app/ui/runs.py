@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
 
 from nicegui import ui
@@ -94,6 +95,7 @@ def mark_run_exited(run_id: int, *, target_engine: Engine = engine) -> bool:
         if run is None:
             return False
         run.status = "exited"
+        run.ended_at = datetime.now()
         return True
 
 
@@ -115,6 +117,8 @@ async def refresh_run_output(
                 run["tmux_session"],
                 ssh_client_factory(),
                 lines=300,
+                engine=engine,
+                run_id=run["id"],
             )
         except Exception as exc:  # pragma: no cover - defensive around real SSH callbacks
             if guard.is_current(generation):

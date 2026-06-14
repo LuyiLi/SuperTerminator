@@ -145,3 +145,28 @@ def test_template_variables_schema_nested_dict_mutation_persists(tmp_path: Path)
         template = session.get(Template, template_id)
         assert template is not None
         assert template.variables_schema[0]["required"] is True
+
+
+def test_project_workdir_allows_only_one_default_per_project_server(tmp_path: Path):
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import ProjectServer, ProjectWorkdir
+
+    settings = Settings(db_path=tmp_path / "app.db")
+    engine = create_engine_for_settings(settings)
+    init_db(engine)
+
+    with session_scope(engine) as session:
+        server = Server(alias="gpu01", name="GPU 01")
+        project = Project(name="demo", default_workdir="/data/demo")
+        session.add_all([server, project])
+        session.flush()
+        link = ProjectServer(project_id=project.id, server_id=server.id)
+        session.add(link)
+        session.flush()
+        session.add(ProjectWorkdir(project_server_id=link.id, path="/data/one", label="one", is_default=True))
+        link_id = link.id
+
+    with pytest.raises(IntegrityError):
+        with session_scope(engine) as session:
+            session.add(ProjectWorkdir(project_server_id=link_id, path="/data/two", label="two", is_default=True))

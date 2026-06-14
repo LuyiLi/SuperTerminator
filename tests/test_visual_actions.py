@@ -527,6 +527,45 @@ async def test_capture_run_output_returns_stderr_or_not_found_message_on_failure
     assert await capture_run_output("gpu01", "gpu-panel-20260613-223000-1", fake) == "tmux session not found"
 
 
+
+
+@pytest.mark.asyncio
+async def test_capture_run_output_marks_run_exited_when_session_missing(engine):
+    project_id, server_id, template_id, _preset_id = _seed_launch_data(engine)
+    with session_scope(engine) as session:
+        run = Run(
+            project_id=project_id,
+            server_id=server_id,
+            template_id=template_id,
+            workdir="/data/demo",
+            name="lost run",
+            tmux_session="gpu-panel-20260613-223000-1",
+            rendered_command="python train.py",
+            status="running",
+            started_at=datetime(2026, 6, 13, 22, 30, 0),
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+
+    command = "tmux capture-pane -t gpu-panel-20260613-223000-1 -p -S -300"
+    fake = FakeSSHClient({command: CommandResult(1, "", "no such session\n")})
+
+    output = await capture_run_output(
+        "gpu01",
+        "gpu-panel-20260613-223000-1",
+        fake,
+        engine=engine,
+        run_id=run_id,
+    )
+
+    assert output == "no such session"
+    with session_scope(engine) as session:
+        stored = session.get(Run, run_id)
+        assert stored.status == "exited"
+        assert stored.ended_at is not None
+
+
 @pytest.mark.asyncio
 async def test_stop_run_kills_tmux_session_and_reports_stopped():
     fake = FakeSSHClient()

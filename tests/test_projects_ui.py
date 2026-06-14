@@ -87,6 +87,64 @@ def test_server_workdir_helpers_link_enabled_servers_and_options(engine, monkeyp
     assert all(path.startswith("/data/") for path in options.workdir_options)
 
 
+def test_default_workdir_helpers_keep_only_one_default(engine, monkeypatch):
+    from app.ui import projects
+
+    monkeypatch.setattr(projects.ui, "notify", lambda *args, **kwargs: None)
+    monkeypatch.setattr(projects.ui.navigate, "reload", lambda: None)
+    with session_scope(engine) as session:
+        project = Project(name="Demo")
+        server = Server(alias="gpu01", enabled=True)
+        session.add_all([project, server])
+        session.flush()
+        link = ProjectServer(project_id=project.id, server_id=server.id, enabled=True)
+        session.add(link)
+        session.flush()
+        link_id = link.id
+
+    first_id = projects.add_project_workdir(
+        link_id, "/data/one", "one", is_default=True, target_engine=engine
+    )
+    second_id = projects.add_project_workdir(
+        link_id, "/data/two", "two", is_default=True, target_engine=engine
+    )
+
+    with session_scope(engine) as session:
+        rows = session.query(ProjectWorkdir).filter_by(project_server_id=link_id).order_by(ProjectWorkdir.id).all()
+        assert [(row.id, row.path, row.is_default) for row in rows] == [
+            (first_id, "/data/one", False),
+            (second_id, "/data/two", True),
+        ]
+
+
+def test_link_server_to_project_replaces_existing_default_workdir(engine, monkeypatch):
+    from app.ui import projects
+
+    monkeypatch.setattr(projects.ui, "notify", lambda *args, **kwargs: None)
+    monkeypatch.setattr(projects.ui.navigate, "reload", lambda: None)
+    with session_scope(engine) as session:
+        project = Project(name="Demo")
+        server = Server(alias="gpu01", enabled=True)
+        session.add_all([project, server])
+        session.flush()
+        project_id = project.id
+        server_id = server.id
+
+    link_id = projects.link_server_to_project(
+        project_id, server_id, "/data/one", target_engine=engine
+    )
+    assert projects.link_server_to_project(
+        project_id, server_id, "/data/two", target_engine=engine
+    ) == link_id
+
+    with session_scope(engine) as session:
+        rows = session.query(ProjectWorkdir).filter_by(project_server_id=link_id).order_by(ProjectWorkdir.id).all()
+        assert [(row.path, row.is_default) for row in rows] == [
+            ("/data/one", False),
+            ("/data/two", True),
+        ]
+
+
 def test_template_and_preset_helpers_build_schema_and_validate_json_like_values(engine, monkeypatch):
     from app.ui import projects
 
