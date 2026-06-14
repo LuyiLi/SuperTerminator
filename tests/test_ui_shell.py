@@ -398,6 +398,10 @@ def test_dashboard_thin_usage_bar_hides_value_text(monkeypatch):
 
     assert calls[0][0] == "linear_progress"
     assert calls[0][2]["show_value"] is False
+    assert any(
+        call[0] == "classes" and "border" in call[1] and "border-grey-7" in call[1]
+        for call in calls
+    )
 
 
 def test_layout_sidebar_has_brand_icons_and_active_state(monkeypatch):

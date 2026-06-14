@@ -173,7 +173,7 @@ def render_thin_usage_bar(percent: Any) -> None:
         _progress_value(percent),
         color=percent_color(percent),
         show_value=False,
-    ).classes("w-full h-1 rounded-full")
+    ).classes("w-full h-1 rounded-full border border-grey-7")
 
 
 def render_gpu_panel(status: ServerStatus) -> None:
