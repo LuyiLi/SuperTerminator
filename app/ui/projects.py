@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
 
 from nicegui import ui
-from sqlalchemy import Engine
+from sqlalchemy import Engine, desc
+from sqlalchemy.orm import joinedload
 
 from app.db import engine, session_scope
-from app.models import Preset, Project, ProjectServer, ProjectWorkdir, Server, Template
+from app.models import Preset, Project, ProjectServer, ProjectWorkdir, Run, Server, Template
+from app.schemas import ServerStatus
 from app.ssh_client import SSHClient
 from app.templates import build_variables_schema, merge_template_values, render_template
-from app.visual_actions import launch_run
+from app.visual_actions import collect_server_status, launch_run
+from app.ui.dashboard import render_pending_server_card, render_server_card
+
+
+_project_status_cache: dict[str, ServerStatus] = {}
 
 
 def _notify(message: str, *, type: str = "info") -> None:
@@ -324,6 +331,30 @@ def build_launch_options(project_id: int, *, target_engine: Engine = engine) -> 
     )
 
 
+def list_project_recent_runs(
+    project_id: int, *, limit: int = 10, target_engine: Engine = engine
+) -> list[dict[str, Any]]:
+    with session_scope(target_engine) as session:
+        runs = (
+            session.query(Run)
+            .options(joinedload(Run.server))
+            .filter(Run.project_id == project_id)
+            .order_by(desc(Run.id))
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "id": run.id,
+                "name": run.name,
+                "server_alias": run.server.alias,
+                "status": run.status,
+                "tmux_session": run.tmux_session,
+            }
+            for run in runs
+        ]
+
+
 def render_projects_page() -> None:
     ui.label("Projects").classes("text-2xl font-bold")
     ui.label("Create projects, then open one to configure launch workflows.").classes("text-grey-7")
@@ -364,21 +395,76 @@ def render_project_detail(project_id: int) -> None:
     if project.default_workdir:
         ui.label(f"Default workdir: {project.default_workdir}").classes("text-grey-7")
 
-    with ui.tabs().classes("w-full") as tabs:
-        launch_tab = ui.tab("Launch")
-        templates_tab = ui.tab("Templates")
-        presets_tab = ui.tab("Presets")
-        servers_tab = ui.tab("Servers & Workdirs")
+    with ui.grid(columns=2).classes("w-full grid-cols-1 xl:grid-cols-3 gap-4"):
+        with ui.column().classes("w-full gap-3 xl:col-span-2"):
+            with ui.expansion("Launch", value=True).classes("w-full"):
+                _render_launch_tab(project_id)
+            with ui.expansion("Templates", value=False).classes("w-full"):
+                _render_templates_tab(project_id)
+            with ui.expansion("Presets", value=False).classes("w-full"):
+                _render_presets_tab(project_id)
+            with ui.expansion("Servers & Workdirs", value=False).classes("w-full"):
+                _render_servers_workdirs_tab(project_id, project.default_workdir)
+        with ui.column().classes("w-full gap-4"):
+            render_project_servers_status_panel(project_id)
+            render_project_recent_runs_panel(project_id)
 
-    with ui.tab_panels(tabs, value=launch_tab).classes("w-full"):
-        with ui.tab_panel(launch_tab):
-            _render_launch_tab(project_id)
-        with ui.tab_panel(templates_tab):
-            _render_templates_tab(project_id)
-        with ui.tab_panel(presets_tab):
-            _render_presets_tab(project_id)
-        with ui.tab_panel(servers_tab):
-            _render_servers_workdirs_tab(project_id, project.default_workdir)
+
+def _render_project_server_status_snapshot(container: Any, aliases: list[str]) -> None:
+    container.clear()
+    with container:
+        for alias in aliases:
+            cached = _project_status_cache.get(alias)
+            if cached is None:
+                render_pending_server_card(alias)
+            else:
+                render_server_card(cached)
+
+
+def render_project_servers_status_panel(project_id: int) -> None:
+    ui.label("Project Servers").classes("text-xl font-semibold")
+    linked = list_project_servers(project_id)
+    aliases = [str(link["server_alias"]) for link in linked]
+    if not aliases:
+        ui.label("No linked servers yet.").classes("text-grey-7")
+        return
+
+    container = ui.column().classes("w-full gap-3")
+    _render_project_server_status_snapshot(container, aliases)
+
+    async def refresh_statuses() -> None:
+        _render_project_server_status_snapshot(container, aliases)
+        results = await asyncio.gather(
+            *(collect_server_status(alias, SSHClient()) for alias in aliases),
+            return_exceptions=True,
+        )
+        for alias, result in zip(aliases, results, strict=True):
+            if isinstance(result, BaseException):
+                _project_status_cache[alias] = ServerStatus(
+                    alias=alias, online=False, error=str(result)
+                )
+            else:
+                _project_status_cache[alias] = result
+        _render_project_server_status_snapshot(container, aliases)
+
+    ui.button("Refresh statuses", on_click=refresh_statuses).props("icon=refresh")
+    ui.timer(0, refresh_statuses, once=True)
+
+
+def render_project_recent_runs_panel(project_id: int) -> None:
+    ui.label("Recent Runs").classes("text-xl font-semibold")
+    runs = list_project_recent_runs(project_id)
+    if not runs:
+        ui.label("No runs for this project yet.").classes("text-grey-7")
+        return
+    for run in runs:
+        with ui.card().classes("w-full"):
+            with ui.row().classes("items-start justify-between w-full gap-3"):
+                with ui.column().classes("gap-1"):
+                    ui.label(f"#{run['id']} {run['name']}").classes("font-semibold")
+                    ui.label(f"{run['server_alias']} · {run['status']}").classes("text-grey-7")
+                    ui.label(str(run["tmux_session"])).classes("font-mono text-grey-8")
+                ui.link("Open", f"/runs/{run['id']}")
 
 
 def _render_servers_workdirs_tab(project_id: int, default_workdir: str) -> None:

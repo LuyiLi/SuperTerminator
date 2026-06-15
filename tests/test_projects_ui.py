@@ -7,7 +7,7 @@ import pytest
 
 from app.config import Settings
 from app.db import create_engine_for_settings, init_db, session_scope
-from app.models import Preset, Project, ProjectServer, ProjectWorkdir, Server, Template
+from app.models import Preset, Project, ProjectServer, ProjectWorkdir, Run, Server, Template
 
 
 @pytest.fixture
@@ -185,6 +185,285 @@ def test_template_and_preset_helpers_build_schema_and_validate_json_like_values(
     assert options.preset_options == {None: "None", preset_id: "quick"}
     assert None in options.preset_options
     assert any(isinstance(value, int) for value in options.preset_options if value is not None)
+
+
+def test_list_project_recent_runs_returns_only_project_runs_newest_first(engine):
+    from app.ui import projects
+
+    with session_scope(engine) as session:
+        project = Project(name="Demo")
+        other_project = Project(name="Other")
+        server = Server(alias="gpu01", enabled=True)
+        other_server = Server(alias="gpu02", enabled=True)
+        session.add_all([project, other_project, server, other_server])
+        session.flush()
+        template = Template(project_id=project.id, name="train", command_template="python train.py")
+        other_template = Template(
+            project_id=other_project.id, name="eval", command_template="python eval.py"
+        )
+        session.add_all([template, other_template])
+        session.flush()
+        old_run = Run(
+            project_id=project.id,
+            server_id=server.id,
+            template_id=template.id,
+            workdir="/data/demo",
+            name="old",
+            tmux_session="tmux-old",
+            rendered_command="python train.py",
+            status="exited",
+        )
+        new_run = Run(
+            project_id=project.id,
+            server_id=other_server.id,
+            template_id=template.id,
+            workdir="/data/demo",
+            name="new",
+            tmux_session="tmux-new",
+            rendered_command="python train.py --new",
+            status="running",
+        )
+        other_run = Run(
+            project_id=other_project.id,
+            server_id=server.id,
+            template_id=other_template.id,
+            workdir="/data/other",
+            name="other",
+            tmux_session="tmux-other",
+            rendered_command="python eval.py",
+            status="running",
+        )
+        session.add_all([old_run, new_run, other_run])
+        session.flush()
+        project_id = project.id
+        new_id = new_run.id
+        old_id = old_run.id
+
+    runs = projects.list_project_recent_runs(project_id, limit=10, target_engine=engine)
+
+    assert runs == [
+        {
+            "id": new_id,
+            "name": "new",
+            "server_alias": "gpu02",
+            "status": "running",
+            "tmux_session": "tmux-new",
+        },
+        {
+            "id": old_id,
+            "name": "old",
+            "server_alias": "gpu01",
+            "status": "exited",
+            "tmux_session": "tmux-old",
+        },
+    ]
+
+
+def test_project_detail_uses_two_column_layout_and_default_open_launch(monkeypatch):
+    from app.ui import projects
+
+    calls = []
+
+    class FakeElement:
+        value = None
+
+        def __init__(self, kind):
+            self.kind = kind
+            calls.append((kind, (), {}))
+
+        def __enter__(self):
+            calls.append((f"enter:{self.kind}", (), {}))
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            calls.append((f"exit:{self.kind}", (), {}))
+            return False
+
+        def classes(self, value):
+            calls.append((f"classes:{self.kind}", (value,), {}))
+            return self
+
+    class FakeUI:
+        def label(self, text):
+            calls.append(("label", (text,), {}))
+            return FakeElement("label")
+
+        def grid(self, **kwargs):
+            calls.append(("grid", (), kwargs))
+            return FakeElement("grid")
+
+        def column(self):
+            return FakeElement("column")
+
+        def expansion(self, text, *, value=False):
+            calls.append(("expansion", (text,), {"value": value}))
+            return FakeElement("expansion")
+
+    monkeypatch.setattr(projects, "ui", FakeUI())
+    monkeypatch.setattr(
+        projects,
+        "get_project",
+        lambda project_id: SimpleNamespace(
+            id=project_id, name="Demo", git_url="git@example/demo.git", default_workdir="/data/demo"
+        ),
+    )
+    rendered = []
+    monkeypatch.setattr(projects, "_render_launch_tab", lambda project_id: rendered.append(("launch", project_id)))
+    monkeypatch.setattr(projects, "_render_templates_tab", lambda project_id: rendered.append(("templates", project_id)))
+    monkeypatch.setattr(projects, "_render_presets_tab", lambda project_id: rendered.append(("presets", project_id)))
+    monkeypatch.setattr(
+        projects,
+        "_render_servers_workdirs_tab",
+        lambda project_id, default_workdir: rendered.append(("servers", project_id, default_workdir)),
+    )
+    monkeypatch.setattr(projects, "render_project_servers_status_panel", lambda project_id: rendered.append(("status", project_id)), raising=False)
+    monkeypatch.setattr(projects, "render_project_recent_runs_panel", lambda project_id: rendered.append(("runs", project_id)), raising=False)
+
+    projects.render_project_detail(7)
+
+    assert any(call[0] == "grid" and call[2].get("columns") == 2 for call in calls)
+    assert any(
+        call[0] == "classes:grid" and "grid-cols-1" in call[1][0] and "xl:grid-cols-3" in call[1][0]
+        for call in calls
+    )
+    assert ("expansion", ("Launch",), {"value": True}) in calls
+    assert ("launch", 7) in rendered
+    assert ("status", 7) in rendered
+    assert ("runs", 7) in rendered
+
+
+def test_project_recent_runs_panel_renders_runs_and_empty_state(monkeypatch):
+    from app.ui import projects
+
+    calls = []
+
+    class FakeElement:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def classes(self, value):
+            calls.append(("classes", value))
+            return self
+
+    class FakeUI:
+        def label(self, text):
+            calls.append(("label", text))
+            return FakeElement()
+
+        def card(self):
+            calls.append(("card", None))
+            return FakeElement()
+
+        def row(self):
+            calls.append(("row", None))
+            return FakeElement()
+
+        def column(self):
+            calls.append(("column", None))
+            return FakeElement()
+
+        def link(self, text, target):
+            calls.append(("link", text, target))
+            return FakeElement()
+
+    monkeypatch.setattr(projects, "ui", FakeUI())
+    monkeypatch.setattr(
+        projects,
+        "list_project_recent_runs",
+        lambda project_id: [
+            {
+                "id": 9,
+                "name": "train",
+                "server_alias": "gpu01",
+                "status": "running",
+                "tmux_session": "tmux-9",
+            }
+        ],
+    )
+
+    projects.render_project_recent_runs_panel(1)
+
+    assert ("label", "Recent Runs") in calls
+    assert ("label", "#9 train") in calls
+    assert ("label", "gpu01 · running") in calls
+    assert ("label", "tmux-9") in calls
+    assert ("link", "Open", "/runs/9") in calls
+
+    calls.clear()
+    monkeypatch.setattr(projects, "list_project_recent_runs", lambda project_id: [])
+    projects.render_project_recent_runs_panel(1)
+    assert ("label", "No runs for this project yet.") in calls
+
+
+def test_project_servers_status_panel_renders_linked_statuses_immediately(monkeypatch):
+    from app.ui import projects
+
+    calls = []
+
+    class FakeElement:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def classes(self, value):
+            calls.append(("classes", value))
+            return self
+
+        def props(self, value):
+            calls.append(("props", value))
+            return self
+
+        def clear(self):
+            calls.append(("clear", None))
+
+    class FakeUI:
+        def label(self, text):
+            calls.append(("label", text))
+            return FakeElement()
+
+        def column(self):
+            calls.append(("column", None))
+            return FakeElement()
+
+        def row(self):
+            calls.append(("row", None))
+            return FakeElement()
+
+        def button(self, text, **kwargs):
+            calls.append(("button", text, "on_click" in kwargs))
+            return FakeElement()
+
+        def timer(self, *args, **kwargs):
+            calls.append(("timer", args, kwargs))
+            return FakeElement()
+
+    monkeypatch.setattr(projects, "ui", FakeUI())
+    monkeypatch.setattr(
+        projects,
+        "list_project_servers",
+        lambda project_id: [{"server_alias": "gpu01"}, {"server_alias": "gpu02"}],
+    )
+    monkeypatch.setattr(projects, "render_pending_server_card", lambda alias: calls.append(("pending", alias)), raising=False)
+    monkeypatch.setattr(projects, "render_server_card", lambda status: calls.append(("status", status.alias)), raising=False)
+    projects._project_status_cache.clear()
+
+    projects.render_project_servers_status_panel(1)
+
+    assert ("label", "Project Servers") in calls
+    assert ("pending", "gpu01") in calls
+    assert ("pending", "gpu02") in calls
+    assert any(call[0] == "button" and call[1] == "Refresh statuses" for call in calls)
+    assert any(call[0] == "timer" and call[1][0] == 0 for call in calls)
+
+    calls.clear()
+    monkeypatch.setattr(projects, "list_project_servers", lambda project_id: [])
+    projects.render_project_servers_status_panel(1)
+    assert ("label", "No linked servers yet.") in calls
 
 
 def test_project_form_selects_use_nicegui_value_to_label_contract(monkeypatch):
