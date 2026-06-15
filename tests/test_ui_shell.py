@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -353,6 +354,147 @@ def test_dashboard_uses_two_column_grid_classes(monkeypatch):
     assert timers[0][1][0] == dashboard.settings.refresh_seconds
     assert timers[1][1][0] == 0
     assert timers[1][2]["once"] is True
+
+
+@pytest.mark.asyncio
+async def test_dashboard_refresh_renders_immediate_snapshot_before_metrics_return(monkeypatch):
+    from app.schemas import ServerStatus
+    from app.ui import dashboard
+
+    callbacks = {}
+    calls = []
+    release_collect = asyncio.Event()
+
+    class FakeElement:
+        def classes(self, _value):
+            return self
+
+        def props(self, _value):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeUI:
+        def row(self):
+            return FakeElement()
+
+        def column(self):
+            return FakeElement()
+
+        def label(self, *_args, **_kwargs):
+            return FakeElement()
+
+        def button(self, *_args, **kwargs):
+            callbacks["refresh"] = kwargs["on_click"]
+            return FakeElement()
+
+        def timer(self, *_args, **_kwargs):
+            return FakeElement()
+
+    async def slow_collect(alias, _ssh_client):
+        calls.append(("collect-start", alias))
+        await release_collect.wait()
+        return ServerStatus(alias=alias, online=True, cpu_percent=12)
+
+    monkeypatch.setattr(dashboard, "ui", FakeUI())
+    monkeypatch.setattr(dashboard, "load_enabled_server_aliases", lambda: ["gpu01"])
+    monkeypatch.setattr(dashboard, "collect_server_status", slow_collect)
+    monkeypatch.setattr(
+        dashboard,
+        "_render_immediate_statuses",
+        lambda _container, aliases: calls.append(("immediate", tuple(aliases))),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "render_results",
+        lambda _container, aliases, results: calls.append(("results", tuple(aliases), len(results))),
+    )
+
+    dashboard.render_dashboard_page()
+    task = asyncio.create_task(callbacks["refresh"]())
+    for _ in range(5):
+        await asyncio.sleep(0)
+        if ("collect-start", "gpu01") in calls:
+            break
+
+    assert calls == [("immediate", ("gpu01",)), ("collect-start", "gpu01")]
+
+    release_collect.set()
+    await task
+    assert calls[-1] == ("results", ("gpu01",), 1)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_refresh_does_not_queue_behind_previous_refresh(monkeypatch):
+    from app.schemas import ServerStatus
+    from app.ui import dashboard
+
+    callbacks = {}
+    collect_starts = []
+    release_collect = asyncio.Event()
+
+    class FakeElement:
+        def classes(self, _value):
+            return self
+
+        def props(self, _value):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeUI:
+        def row(self):
+            return FakeElement()
+
+        def column(self):
+            return FakeElement()
+
+        def label(self, *_args, **_kwargs):
+            return FakeElement()
+
+        def button(self, *_args, **kwargs):
+            callbacks["refresh"] = kwargs["on_click"]
+            return FakeElement()
+
+        def timer(self, *_args, **_kwargs):
+            return FakeElement()
+
+    async def slow_collect(alias, _ssh_client):
+        collect_starts.append(alias)
+        await release_collect.wait()
+        return ServerStatus(alias=alias, online=True)
+
+    monkeypatch.setattr(dashboard, "ui", FakeUI())
+    monkeypatch.setattr(dashboard, "load_enabled_server_aliases", lambda: ["gpu01"])
+    monkeypatch.setattr(dashboard, "collect_server_status", slow_collect)
+    monkeypatch.setattr(dashboard, "_render_immediate_statuses", lambda _container, _aliases: None)
+    monkeypatch.setattr(dashboard, "render_results", lambda _container, _aliases, _results: None)
+
+    dashboard.render_dashboard_page()
+    first = asyncio.create_task(callbacks["refresh"]())
+    for _ in range(5):
+        await asyncio.sleep(0)
+        if len(collect_starts) == 1:
+            break
+    second = asyncio.create_task(callbacks["refresh"]())
+    for _ in range(5):
+        await asyncio.sleep(0)
+        if len(collect_starts) == 2:
+            break
+
+    assert collect_starts == ["gpu01", "gpu01"]
+
+    release_collect.set()
+    await first
+    await second
 
 
 def test_dashboard_summary_helpers_format_clean_integer_percentages():

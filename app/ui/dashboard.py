@@ -16,13 +16,13 @@ from app.visual_actions import collect_server_status
 
 settings = load_settings()
 _expanded_servers: set[str] = set()
+_status_cache: dict[str, ServerStatus] = {}
 
 
 class DashboardRefreshGuard:
     """Coordinate refreshes so older results cannot overwrite newer requests."""
 
     def __init__(self) -> None:
-        self.lock = asyncio.Lock()
         self._generation = 0
 
     def next_generation(self) -> int:
@@ -321,6 +321,46 @@ def render_server_card(status: ServerStatus) -> None:
                 render_system_panel(status)
 
 
+def render_empty_state(container: Any) -> None:
+    container.clear()
+    with container:
+        with ui.card().classes("w-full"):
+            ui.label("No enabled servers. Add one on the Servers page.").classes("text-grey-7")
+
+
+def render_pending_server_card(alias: str) -> None:
+    with ui.card().classes("w-full border border-grey-3 shadow-sm bg-grey-1"):
+        with ui.row().classes("items-start justify-between w-full gap-3"):
+            ui.label(alias).classes("text-xl font-bold")
+            ui.badge("refreshing", color="warning").classes("uppercase")
+        ui.label("Collecting metrics...").classes("text-grey-7")
+
+
+def _render_immediate_statuses(container: Any, aliases: list[str]) -> None:
+    container.clear()
+    with container:
+        for alias in aliases:
+            cached = _status_cache.get(alias)
+            if cached is None:
+                render_pending_server_card(alias)
+            else:
+                render_server_card(cached)
+
+
+def render_results(
+    container: Any, aliases: list[str], results: list[ServerStatus | BaseException]
+) -> None:
+    container.clear()
+    with container:
+        for alias, result in zip(aliases, results, strict=True):
+            if isinstance(result, BaseException):
+                status = ServerStatus(alias=alias, online=False, error=str(result))
+            else:
+                status = result
+            _status_cache[alias] = status
+            render_server_card(status)
+
+
 def render_dashboard_page() -> None:
     """Render the home dashboard with periodically refreshed server status."""
 
@@ -332,39 +372,23 @@ def render_dashboard_page() -> None:
     container = ui.column().classes("w-full grid grid-cols-1 lg:grid-cols-2 gap-4")
     refresh_guard = DashboardRefreshGuard()
 
-    def render_empty_state() -> None:
-        container.clear()
-        with container:
-            with ui.card().classes("w-full"):
-                ui.label("No enabled servers. Add one on the Servers page.").classes(
-                    "text-grey-7"
-                )
-
-    def render_results(aliases: list[str], results: list[ServerStatus | BaseException]) -> None:
-        container.clear()
-        with container:
-            for alias, result in zip(aliases, results, strict=True):
-                if isinstance(result, BaseException):
-                    status = ServerStatus(alias=alias, online=False, error=str(result))
-                else:
-                    status = result
-                render_server_card(status)
-
     async def refresh() -> None:
         generation = refresh_guard.next_generation()
-        async with refresh_guard.lock:
-            aliases = load_enabled_server_aliases()
-            if not aliases:
-                if refresh_guard.is_current(generation):
-                    render_empty_state()
-                return
-
-            results = await asyncio.gather(
-                *(collect_server_status(alias, SSHClient()) for alias in aliases),
-                return_exceptions=True,
-            )
+        aliases = load_enabled_server_aliases()
+        if not aliases:
             if refresh_guard.is_current(generation):
-                render_results(aliases, results)
+                render_empty_state(container)
+            return
+
+        if refresh_guard.is_current(generation):
+            _render_immediate_statuses(container, aliases)
+
+        results = await asyncio.gather(
+            *(collect_server_status(alias, SSHClient()) for alias in aliases),
+            return_exceptions=True,
+        )
+        if refresh_guard.is_current(generation):
+            render_results(container, aliases, results)
 
     ui.button("Refresh now", on_click=refresh).props("icon=refresh")
     ui.timer(settings.refresh_seconds, refresh)
