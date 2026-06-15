@@ -321,12 +321,13 @@ def test_project_detail_uses_two_column_layout_and_default_open_launch(monkeypat
 
     projects.render_project_detail(7)
 
-    assert any(call[0] == "grid" and call[2].get("columns") == 2 for call in calls)
+    assert any(call[0] == "grid" and call[2].get("columns") == 3 for call in calls)
     assert any(
-        call[0] == "classes:grid" and "grid-cols-1" in call[1][0] and "xl:grid-cols-3" in call[1][0]
+        call[0] == "classes:grid" and "grid-cols-3" in call[1][0] and "grid-cols-1" not in call[1][0]
         for call in calls
     )
     assert ("expansion", ("Launch",), {"value": True}) in calls
+    assert any(call[0] == "classes:column" and "col-span-2" in call[1][0] for call in calls)
     assert ("launch", 7) in rendered
     assert ("status", 7) in rendered
     assert ("runs", 7) in rendered

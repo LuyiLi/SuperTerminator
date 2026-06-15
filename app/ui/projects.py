@@ -395,8 +395,8 @@ def render_project_detail(project_id: int) -> None:
     if project.default_workdir:
         ui.label(f"Default workdir: {project.default_workdir}").classes("text-grey-7")
 
-    with ui.grid(columns=2).classes("w-full grid-cols-1 xl:grid-cols-3 gap-4"):
-        with ui.column().classes("w-full gap-3 xl:col-span-2"):
+    with ui.grid(columns=3).classes("w-full grid-cols-3 gap-4"):
+        with ui.column().classes("w-full gap-3 col-span-2"):
             with ui.expansion("Launch", value=True).classes("w-full"):
                 _render_launch_tab(project_id)
             with ui.expansion("Templates", value=False).classes("w-full"):
