@@ -8,6 +8,7 @@ import pytest
 from app.config import Settings
 from app.db import create_engine_for_settings, init_db, session_scope
 from app.models import Preset, Project, ProjectServer, ProjectWorkdir, Run, Server, Template
+from app.schemas import CommandResult
 
 
 @pytest.fixture
@@ -238,6 +239,8 @@ def test_list_project_recent_runs_returns_only_project_runs_newest_first(engine)
         project_id = project.id
         new_id = new_run.id
         old_id = old_run.id
+        server_id = server.id
+        other_server_id = other_server.id
 
     runs = projects.list_project_recent_runs(project_id, limit=10, target_engine=engine)
 
@@ -245,18 +248,74 @@ def test_list_project_recent_runs_returns_only_project_runs_newest_first(engine)
         {
             "id": new_id,
             "name": "new",
+            "server_id": other_server_id,
             "server_alias": "gpu02",
+            "workdir": "/data/demo",
+            "rendered_command": "python train.py --new",
             "status": "running",
             "tmux_session": "tmux-new",
         },
         {
             "id": old_id,
             "name": "old",
+            "server_id": server_id,
             "server_alias": "gpu01",
+            "workdir": "/data/demo",
+            "rendered_command": "python train.py",
             "status": "exited",
             "tmux_session": "tmux-old",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_launch_direct_command_from_project_creates_tmux_run(engine):
+    from app.ui import projects
+
+    class FakeSSHClient:
+        def __init__(self):
+            self.commands = []
+
+        async def run(self, alias, command, timeout=30):
+            self.commands.append((alias, command, timeout))
+            return CommandResult(0, "", "")
+
+    with session_scope(engine) as session:
+        project = Project(name="Demo")
+        server = Server(alias="gpu01", enabled=True)
+        session.add_all([project, server])
+        session.flush()
+        link = ProjectServer(project_id=project.id, server_id=server.id, enabled=True)
+        session.add(link)
+        session.flush()
+        session.add(ProjectWorkdir(project_server_id=link.id, path="/data/demo", label="main", is_default=True))
+        session.flush()
+        project_id = project.id
+        server_id = server.id
+
+    fake = FakeSSHClient()
+    run = await projects.launch_direct_command_from_project(
+        project_id=project_id,
+        server_id=server_id,
+        workdir="/data/demo",
+        run_name="manual run",
+        command="echo before && torchrun train.py",
+        ssh_client=fake,
+        target_engine=engine,
+    )
+
+    assert run.status == "running"
+    assert run.name == "manual run"
+    assert run.rendered_command == "echo before && torchrun train.py"
+    assert fake.commands[-1][0] == "gpu01"
+    assert "tmux new-session -d -s" in fake.commands[-1][1]
+    assert "cd /data/demo && echo before && torchrun train.py" in fake.commands[-1][1]
+
+    with session_scope(engine) as session:
+        stored = session.get(Run, run.id)
+        assert stored is not None
+        assert stored.rendered_command == "echo before && torchrun train.py"
+        assert stored.template.name == "Direct command"
 
 
 def test_project_detail_uses_two_column_layout_and_default_open_launch(monkeypatch):
@@ -308,7 +367,7 @@ def test_project_detail_uses_two_column_layout_and_default_open_launch(monkeypat
         ),
     )
     rendered = []
-    monkeypatch.setattr(projects, "_render_launch_tab", lambda project_id: rendered.append(("launch", project_id)))
+    monkeypatch.setattr(projects, "_render_launch_tab", lambda project_id: rendered.append(("launch", project_id)) or "use-command")
     monkeypatch.setattr(projects, "_render_templates_tab", lambda project_id: rendered.append(("templates", project_id)))
     monkeypatch.setattr(projects, "_render_presets_tab", lambda project_id: rendered.append(("presets", project_id)))
     monkeypatch.setattr(
@@ -317,7 +376,7 @@ def test_project_detail_uses_two_column_layout_and_default_open_launch(monkeypat
         lambda project_id, default_workdir: rendered.append(("servers", project_id, default_workdir)),
     )
     monkeypatch.setattr(projects, "render_project_servers_status_panel", lambda project_id: rendered.append(("status", project_id)), raising=False)
-    monkeypatch.setattr(projects, "render_project_recent_runs_panel", lambda project_id: rendered.append(("runs", project_id)), raising=False)
+    monkeypatch.setattr(projects, "render_project_recent_runs_panel", lambda project_id, on_use_command=None: rendered.append(("runs", project_id, on_use_command)), raising=False)
 
     projects.render_project_detail(7)
 
@@ -330,7 +389,7 @@ def test_project_detail_uses_two_column_layout_and_default_open_launch(monkeypat
     assert any(call[0] == "classes:column" and "col-span-2" in call[1][0] for call in calls)
     assert ("launch", 7) in rendered
     assert ("status", 7) in rendered
-    assert ("runs", 7) in rendered
+    assert ("runs", 7, "use-command") in rendered
 
 
 def test_project_recent_runs_panel_renders_runs_and_empty_state(monkeypatch):
@@ -366,6 +425,12 @@ def test_project_recent_runs_panel_renders_runs_and_empty_state(monkeypatch):
             calls.append(("column", None))
             return FakeElement()
 
+        def button(self, text, **kwargs):
+            calls.append(("button", text, "on_click" in kwargs))
+            if "on_click" in kwargs:
+                self.last_on_click = kwargs["on_click"]
+            return FakeElement()
+
         def link(self, text, target):
             calls.append(("link", text, target))
             return FakeElement()
@@ -378,25 +443,113 @@ def test_project_recent_runs_panel_renders_runs_and_empty_state(monkeypatch):
             {
                 "id": 9,
                 "name": "train",
+                "server_id": 3,
                 "server_alias": "gpu01",
+                "workdir": "/data/demo",
+                "rendered_command": "conda activate env\ntorchrun train.py --run_name demo",
                 "status": "running",
                 "tmux_session": "tmux-9",
             }
         ],
     )
 
-    projects.render_project_recent_runs_panel(1)
+    used = []
+    projects.render_project_recent_runs_panel(1, on_use_command=lambda run: used.append(run))
 
     assert ("label", "Recent Runs") in calls
     assert ("label", "#9 train") in calls
     assert ("label", "gpu01 · running") in calls
     assert ("label", "tmux-9") in calls
+    assert ("label", "conda activate env") in calls
+    assert ("button", "Use command", True) in calls
     assert ("link", "Open", "/runs/9") in calls
 
     calls.clear()
     monkeypatch.setattr(projects, "list_project_recent_runs", lambda project_id: [])
     projects.render_project_recent_runs_panel(1)
     assert ("label", "No runs for this project yet.") in calls
+
+
+def test_launch_tab_uses_pasted_command_mode_and_refills_from_run(monkeypatch):
+    from app.ui import projects
+
+    elements = {}
+    calls = []
+
+    class FakeElement:
+        def __init__(self, label=None, value=None):
+            self.label = label
+            self.value = value
+
+        def classes(self, value):
+            calls.append(("classes", self.label, value))
+            return self
+
+        def props(self, value):
+            calls.append(("props", self.label, value))
+            return self
+
+    class FakeUI:
+        navigate = SimpleNamespace(to=lambda target: calls.append(("navigate", target)))
+
+        def label(self, text):
+            calls.append(("label", text))
+            return FakeElement(text)
+
+        def select(self, options, *, label, value=None):
+            element = FakeElement(label, value)
+            element.options = options
+            elements[label] = element
+            calls.append(("select", label, options, value))
+            return element
+
+        def input(self, label, *, value=""):
+            element = FakeElement(label, value)
+            elements[label] = element
+            calls.append(("input", label, value))
+            return element
+
+        def textarea(self, label, **kwargs):
+            element = FakeElement(label, kwargs.get("value", ""))
+            elements[label] = element
+            calls.append(("textarea", label))
+            return element
+
+        def button(self, text, **kwargs):
+            calls.append(("button", text, "on_click" in kwargs))
+            return FakeElement(text)
+
+    monkeypatch.setattr(projects, "ui", FakeUI())
+    monkeypatch.setattr(
+        projects,
+        "build_launch_options",
+        lambda project_id: SimpleNamespace(
+            server_options={3: "gpu01"},
+            workdir_options={"/data/demo": "gpu01: main (/data/demo)"},
+        ),
+    )
+
+    use_command = projects._render_launch_tab(1)
+
+    assert ("label", "Launch Command") in calls
+    assert ("select", "Server", {3: "gpu01"}, 3) in calls
+    assert ("select", "Workdir", {"/data/demo": "gpu01: main (/data/demo)"}, "/data/demo") in calls
+    assert any(call[0] == "textarea" and call[1] == "Command" for call in calls)
+    assert any(call[0] == "button" and call[1] == "Run in tmux" for call in calls)
+
+    use_command(
+        {
+            "name": "old run",
+            "server_id": 3,
+            "workdir": "/data/demo",
+            "rendered_command": "torchrun train.py",
+        }
+    )
+
+    assert elements["Command"].value == "torchrun train.py"
+    assert elements["Server"].value == 3
+    assert elements["Workdir"].value == "/data/demo"
+    assert elements["Run name"].value == "copy of old run"
 
 
 def test_project_servers_status_panel_renders_linked_statuses_immediately(monkeypatch):

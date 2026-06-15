@@ -190,6 +190,99 @@ async def launch_run(
         return stored
 
 
+def _get_or_create_direct_command_template(session, project_id: int) -> Template:
+    template = (
+        session.query(Template)
+        .filter_by(project_id=project_id, name="Direct command")
+        .one_or_none()
+    )
+    if template is None:
+        template = Template(
+            project_id=project_id,
+            name="Direct command",
+            command_template="<direct command>",
+            variables_schema=[],
+        )
+        session.add(template)
+        session.flush()
+    return template
+
+
+async def launch_direct_command(
+    *,
+    engine: Engine,
+    ssh_client,
+    project_id: int,
+    server_id: int,
+    workdir: str,
+    run_name: str,
+    command: str,
+) -> Run:
+    clean_command = command.strip()
+    if not clean_command:
+        raise ValueError("Command is required")
+
+    with session_scope(engine) as session:
+        server = session.get(Server, server_id)
+        if server is None:
+            raise ValueError(f"Server not found: {server_id}")
+
+        project_server = (
+            session.query(ProjectServer)
+            .filter_by(project_id=project_id, server_id=server_id, enabled=True)
+            .one_or_none()
+        )
+        if project_server is None:
+            raise ValueError(f"Server {server_id} is not linked to project {project_id}")
+        project_workdir = (
+            session.query(ProjectWorkdir)
+            .filter_by(project_server_id=project_server.id, path=workdir)
+            .one_or_none()
+        )
+        if project_workdir is None:
+            raise ValueError(f"Workdir {workdir} is not configured for server {server_id}")
+
+        template = _get_or_create_direct_command_template(session, project_id)
+        run = Run(
+            project_id=project_id,
+            server_id=server_id,
+            template_id=template.id,
+            preset_id=None,
+            workdir=workdir,
+            name=run_name.strip() or "manual command",
+            rendered_command=clean_command,
+            status="created",
+            started_at=datetime.now(),
+        )
+        session.add(run)
+        session.flush()
+        run.tmux_session = make_tmux_session_name(run.id, now=datetime.now())
+        session.flush()
+
+        alias = server.alias
+        tmux_command = build_tmux_start_command(
+            run.tmux_session,
+            workdir=workdir,
+            rendered_command=clean_command,
+        )
+        run_id = run.id
+
+    try:
+        result = await ssh_client.run(alias, tmux_command, timeout=15)
+    except Exception:
+        _mark_run_unknown(engine, run_id)
+        raise
+
+    with session_scope(engine) as session:
+        stored = session.get(Run, run_id)
+        if stored is None:
+            raise ValueError(f"Run disappeared: {run_id}")
+        stored.status = "running" if result.exit_status == 0 else "unknown"
+        session.flush()
+        session.expunge(stored)
+        return stored
+
+
 async def capture_run_output(
     alias: str,
     session_name: str,

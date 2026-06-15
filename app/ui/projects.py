@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 
 from nicegui import ui
@@ -14,7 +15,7 @@ from app.models import Preset, Project, ProjectServer, ProjectWorkdir, Run, Serv
 from app.schemas import ServerStatus
 from app.ssh_client import SSHClient
 from app.templates import build_variables_schema, merge_template_values, render_template
-from app.visual_actions import collect_server_status, launch_run
+from app.visual_actions import collect_server_status, launch_direct_command, launch_run
 from app.ui.dashboard import render_pending_server_card, render_server_card
 
 
@@ -347,12 +348,36 @@ def list_project_recent_runs(
             {
                 "id": run.id,
                 "name": run.name,
+                "server_id": run.server_id,
                 "server_alias": run.server.alias,
+                "workdir": run.workdir,
+                "rendered_command": run.rendered_command,
                 "status": run.status,
                 "tmux_session": run.tmux_session,
             }
             for run in runs
         ]
+
+
+async def launch_direct_command_from_project(
+    *,
+    project_id: int,
+    server_id: int,
+    workdir: str,
+    run_name: str,
+    command: str,
+    ssh_client: Any | None = None,
+    target_engine: Engine = engine,
+) -> Run:
+    return await launch_direct_command(
+        engine=target_engine,
+        ssh_client=ssh_client or SSHClient(),
+        project_id=project_id,
+        server_id=server_id,
+        workdir=workdir,
+        run_name=run_name,
+        command=command,
+    )
 
 
 def render_projects_page() -> None:
@@ -398,7 +423,7 @@ def render_project_detail(project_id: int) -> None:
     with ui.grid(columns=3).classes("w-full grid-cols-3 gap-4"):
         with ui.column().classes("w-full gap-3 col-span-2"):
             with ui.expansion("Launch", value=True).classes("w-full"):
-                _render_launch_tab(project_id)
+                use_command = _render_launch_tab(project_id)
             with ui.expansion("Templates", value=False).classes("w-full"):
                 _render_templates_tab(project_id)
             with ui.expansion("Presets", value=False).classes("w-full"):
@@ -407,7 +432,7 @@ def render_project_detail(project_id: int) -> None:
                 _render_servers_workdirs_tab(project_id, project.default_workdir)
         with ui.column().classes("w-full gap-4"):
             render_project_servers_status_panel(project_id)
-            render_project_recent_runs_panel(project_id)
+            render_project_recent_runs_panel(project_id, on_use_command=use_command)
 
 
 def _render_project_server_status_snapshot(container: Any, aliases: list[str]) -> None:
@@ -451,7 +476,9 @@ def render_project_servers_status_panel(project_id: int) -> None:
     ui.timer(0, refresh_statuses, once=True)
 
 
-def render_project_recent_runs_panel(project_id: int) -> None:
+def render_project_recent_runs_panel(
+    project_id: int, *, on_use_command: Callable[[dict[str, Any]], None] | None = None
+) -> None:
     ui.label("Recent Runs").classes("text-xl font-semibold")
     runs = list_project_recent_runs(project_id)
     if not runs:
@@ -464,7 +491,13 @@ def render_project_recent_runs_panel(project_id: int) -> None:
                     ui.label(f"#{run['id']} {run['name']}").classes("font-semibold")
                     ui.label(f"{run['server_alias']} · {run['status']}").classes("text-grey-7")
                     ui.label(str(run["tmux_session"])).classes("font-mono text-grey-8")
-                ui.link("Open", f"/runs/{run['id']}")
+                    command_summary = str(run.get("rendered_command", "")).strip().splitlines()
+                    if command_summary:
+                        ui.label(command_summary[0]).classes("font-mono text-grey-7")
+                with ui.column().classes("gap-2"):
+                    if on_use_command is not None:
+                        ui.button("Use command", on_click=lambda run=run: on_use_command(run))
+                    ui.link("Open", f"/runs/{run['id']}")
 
 
 def _render_servers_workdirs_tab(project_id: int, default_workdir: str) -> None:
@@ -568,69 +601,55 @@ def _render_presets_tab(project_id: int) -> None:
             ui.label(json.dumps(dict(preset.values_json or {}), sort_keys=True)).classes("font-mono")
 
 
-def _render_launch_tab(project_id: int) -> None:
-    ui.label("Launch").classes("text-xl font-semibold")
+def _first_key(options: dict[Any, str]) -> Any | None:
+    return next(iter(options), None)
+
+
+def _render_launch_tab(project_id: int) -> Callable[[dict[str, Any]], None]:
+    ui.label("Launch Command").classes("text-xl font-semibold")
+    ui.label("Paste a shell command and run it inside tmux on the selected server.").classes("text-grey-7")
     options = build_launch_options(project_id)
-    template_select = ui.select(options.template_options, label="Template").classes("w-96")
-    preset_select = ui.select(options.preset_options, label="Preset", value=None).classes("w-96")
-    server_select = ui.select(options.server_options, label="Server").classes("w-96")
-    workdir_select = ui.select(options.workdir_options, label="Workdir").classes("w-full")
-    run_name = ui.input("Run name", value="training run").classes("w-96")
-    variables_container = ui.column().classes("w-full")
-    preview = ui.textarea("Rendered command").classes("w-full")
-    variable_inputs: dict[str, Any] = {}
 
-    def selected_template() -> Template | None:
-        return options.templates.get(int(template_select.value)) if template_select.value is not None else None
+    server_select = ui.select(
+        options.server_options,
+        label="Server",
+        value=_first_key(options.server_options),
+    ).classes("w-96")
+    workdir_select = ui.select(
+        options.workdir_options,
+        label="Workdir",
+        value=_first_key(options.workdir_options),
+    ).classes("w-full")
+    run_name = ui.input("Run name", value="manual command").classes("w-96")
+    command_input = ui.textarea(
+        "Command",
+        placeholder="source ~/miniconda3/etc/profile.d/conda.sh\nconda activate env\ntorchrun ...",
+    ).classes("w-full")
+    command_input.props("autogrow")
 
-    def selected_preset_values() -> dict[str, Any]:
-        if preset_select.value is None:
-            return {}
-        preset = options.presets.get(int(preset_select.value))
-        return dict(preset.values_json or {}) if preset is not None else {}
-
-    def refresh_preview() -> None:
-        template = selected_template()
-        if template is None:
-            preview.value = ""
-            return
-        form_values = {name: input_.value for name, input_ in variable_inputs.items()}
-        try:
-            values = merge_template_values(template.variables_schema, selected_preset_values(), form_values)
-            preview.value = render_template(template.command_template, template.variables_schema, values)
-        except Exception as exc:
-            preview.value = str(exc)
-
-    def refresh_variables() -> None:
-        variables_container.clear()
-        variable_inputs.clear()
-        template = selected_template()
-        if template is None:
-            refresh_preview()
-            return
-        preset_values = selected_preset_values()
-        with variables_container:
-            for item in template.variables_schema or []:
-                name = str(item["name"])
-                default = preset_values.get(name, item.get("default", ""))
-                variable_inputs[name] = ui.input(str(item.get("label", name)), value=default).classes("w-96")
-        refresh_preview()
+    def use_command(run: dict[str, Any]) -> None:
+        command_input.value = str(run.get("rendered_command", ""))
+        if run.get("server_id") in options.server_options:
+            server_select.value = run["server_id"]
+        if run.get("workdir") in options.workdir_options:
+            workdir_select.value = run["workdir"]
+        name = str(run.get("name", "manual command")).strip() or "manual command"
+        run_name.value = f"copy of {name}"
 
     async def do_launch() -> None:
-        if template_select.value is None or server_select.value is None or not workdir_select.value:
-            _notify("Choose template, server, and workdir.", type="negative")
+        if server_select.value is None or not workdir_select.value:
+            _notify("Choose server and workdir.", type="negative")
+            return
+        if not str(command_input.value or "").strip():
+            _notify("Command is required.", type="negative")
             return
         try:
-            run = await launch_run(
-                engine=engine,
-                ssh_client=SSHClient(),
+            run = await launch_direct_command_from_project(
                 project_id=project_id,
                 server_id=int(server_select.value),
-                template_id=int(template_select.value),
-                preset_id=int(preset_select.value) if preset_select.value else None,
                 workdir=str(workdir_select.value),
-                run_name=run_name.value or "training run",
-                form_values={name: input_.value for name, input_ in variable_inputs.items()},
+                run_name=run_name.value or "manual command",
+                command=command_input.value or "",
             )
         except Exception as exc:
             _notify(str(exc), type="negative")
@@ -638,8 +657,5 @@ def _render_launch_tab(project_id: int) -> None:
         _notify(f"Started {run.tmux_session}", type="positive" if run.status == "running" else "warning")
         ui.navigate.to(f"/runs/{run.id}")
 
-    template_select.on("update:model-value", lambda _: refresh_variables())
-    preset_select.on("update:model-value", lambda _: refresh_variables())
-    ui.button("Refresh preview", on_click=refresh_preview)
-    ui.button("Launch", on_click=do_launch).props("color=primary")
-    refresh_variables()
+    ui.button("Run in tmux", on_click=do_launch).props("color=primary icon=play_arrow")
+    return use_command
