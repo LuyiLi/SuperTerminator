@@ -27,6 +27,16 @@ uv sync
 scripts/start.sh
 ```
 
+## 运行排查工作台
+
+`/runs` 将任务列表与选中任务详情放在同一页面，可按状态、项目、名称或机器筛选。
+“概况”显示从真实输出解析的进度，“输出”保留最近日志，“启动信息”保留完整命令和运行来源。
+状态核实与日志采集独立进行；连接失败时保留最后成功输出，并单独提示采集错误。
+
+项目页默认进入运行监控，启动、收藏配置、资源和项目配置分开呈现。
+在同一项目内切换视图会保留启动草稿；从任务复用配置后可返回监控。
+机器管理通过独立入口添加、导入与编辑，移除机器或停止任务前会显示具体对象。
+
 ## SSH model
 
 The app uses the current user's `~/.ssh/config`, SSH agent, and default keys. It does not store SSH passwords or private keys.

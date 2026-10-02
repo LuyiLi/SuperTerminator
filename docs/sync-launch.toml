@@ -1,0 +1,62 @@
+# V1 deployment configuration; four-machine onboarding updated 2026-09-28.
+# No secrets here. Credentials stay in the remote account's environment / .netrc.
+version = 1
+environment = "newton"
+project_name = "whole body tracking"
+sources = ["/home/luyi/git/whole_body_tracking"]
+discover_worktrees = true
+include = ["source", "scripts", "pyproject.toml", "uv.lock", "README.md", "LICENCE"]
+exclude = ["source/whole_body_tracking/whole_body_tracking/assets/unitree_description", "source/whole_body_tracking/whole_body_tracking/assets/nvidia", "source/whole_body_tracking/whole_body_tracking/assets/punch_targets", "**/*.egg-info"]
+max_file_bytes = 33554432
+min_free_bytes = 32212254720
+
+[wandb]
+base_url = "http://100.105.111.86:8080"
+entity = "luyi26"
+project = "inreal_tracking"
+
+[machines.lhy_aliyun_5090]
+managed_root = "/home/luyi/.superterminator/whole_body_tracking"
+uv_path = "/home/luyi/.local/bin/uv"
+[machines.lhy_aliyun_5090.external_paths]
+dataset = "/home/luyi/whole_body_tracking/Datasets/inreal_umr_lafan58_mirror_50fps"
+
+[machines.mzw_aliyun_5090]
+managed_root = "/home/luyi/.superterminator/whole_body_tracking"
+uv_path = "/home/luyi/.local/bin/uv"
+[machines.mzw_aliyun_5090.external_paths]
+dataset = "/home/luyi/whole_body_tracking/Datasets/inreal_umr_lafan58_mirror_50fps"
+
+[machines.lkx_aliyun_5090]
+managed_root = "/home/luyi/.superterminator/whole_body_tracking"
+uv_path = "/home/luyi/.local/bin/uv"
+[machines.lkx_aliyun_5090.external_paths]
+dataset = "/home/luyi/whole_body_tracking/Datasets/inreal_umr_lafan58_mirror_50fps"
+
+[machines.aliyun_5090_8002]
+managed_root = "/home/luyi/.superterminator/whole_body_tracking"
+uv_path = "/home/luyi/.local/bin/uv"
+[machines.aliyun_5090_8002.external_paths]
+dataset = "/home/luyi/whole_body_tracking/Datasets/inreal_umr_lafan58_mirror_50fps"
+
+[[experiments]]
+id = "inreal-athlete"
+name = "InReal · Athlete encoder · Newton"
+entrypoint = "scripts/rsl_rl/train.py"
+task = "Tracking-JointEncoder-Inrealv2-v0"
+dataset = "dataset"
+[experiments.defaults]
+num_envs = 10000
+max_iterations = 30000
+seed = 42
+
+[[experiments]]
+id = "inreal-rgmt"
+name = "InReal · RGMT encoder · Newton"
+entrypoint = "scripts/rsl_rl/train.py"
+task = "Tracking-RGMTEncoder-Inrealv2-v0"
+dataset = "dataset"
+[experiments.defaults]
+num_envs = 10000
+max_iterations = 30000
+seed = 42

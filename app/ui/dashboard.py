@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 import re
 from typing import Any
 
@@ -13,6 +15,7 @@ from app.models import Server
 from app.schemas import ServerStatus
 from app.ssh_client import SSHClient
 from app.visual_actions import collect_server_status
+from app.ui.scoped_timer import create_scoped_timer
 
 settings = load_settings()
 _expanded_servers: set[str] = set()
@@ -257,83 +260,318 @@ def render_system_panel(status: ServerStatus) -> None:
             _render_disks(status)
 
 
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def metric_percent(value: Any) -> float | None:
+    """Unlike the legacy formatters, keep missing readings distinct from zero."""
+    if isinstance(value, str):
+        value = value.strip().removesuffix("%").strip()
+    number = _finite_number(value)
+    return None if number is None else max(0.0, min(number, 100.0))
+
+
+def metric_ratio(used: Any, total: Any) -> float | None:
+    numerator, denominator = _finite_number(used), _finite_number(total)
+    if numerator is None or denominator is None or denominator <= 0 or numerator < 0:
+        return None
+    return metric_percent(numerator / denominator * 100)
+
+
+def gpu_metric_values(gpu: Any) -> tuple[float | None, float | None]:
+    return (
+        metric_percent(_mapping_value(gpu, "utilization_gpu_percent", None)),
+        metric_ratio(
+            _mapping_value(gpu, "memory_used_mib", None),
+            _mapping_value(gpu, "memory_total_mib", None),
+        ),
+    )
+
+
+def _metric_text(value: float | None) -> str:
+    return "未知" if value is None else f"{value:g}%"
+
+
+def _gpu_memory_text(gpu: Any) -> str:
+    used = _mapping_value(gpu, "memory_used_mib", None)
+    total = _mapping_value(gpu, "memory_total_mib", None)
+    if metric_ratio(used, total) is None:
+        return "未知"
+    return f"{format_mib(used)} / {format_mib(total)}"
+
+
+def gpu_spec(status: ServerStatus) -> str:
+    if not status.online:
+        return "离线 · 连接失败" if status.error else "离线"
+    if not status.gpu:
+        return "暂无 GPU 指标"
+    names = {str(_mapping_value(gpu, "name", "GPU")) for gpu in status.gpu}
+    capacities = {_mapping_value(gpu, "memory_total_mib", None) for gpu in status.gpu}
+    if len(names) == 1:
+        model = next(iter(names)).removeprefix("NVIDIA ").removeprefix("GeForce ")
+        spec = f"{len(status.gpu)} × {model}"
+    else:
+        spec = f"{len(status.gpu)} 张 GPU · 混合型号"
+    if len(capacities) == 1:
+        capacity = _finite_number(next(iter(capacities)))
+        if capacity is not None and capacity > 0:
+            spec += f" · {format_mib(capacity)} / 卡"
+    return spec
+
+
+def system_metrics(status: ServerStatus) -> list[tuple[str, float | None, str]]:
+    if not status.online:
+        return [(label, None, "指标未知") for label in ("CPU", "RAM", "磁盘")]
+    cpu = metric_percent(status.cpu_percent)
+    memory = status.memory
+    ram = metric_percent(_mapping_value(memory, "used_percent", None))
+    total = _finite_number(_mapping_value(memory, "total_kib", None))
+    available = _finite_number(_mapping_value(memory, "available_kib", None))
+    ram_detail = "未知"
+    if total is not None and total > 0 and available is not None:
+        used = max(0.0, total - available)
+        if ram is None:
+            ram = metric_ratio(used, total)
+        ram_detail = f"{format_kib(used)} / {format_kib(total)} · {_metric_text(ram)}"
+    elif ram is not None:
+        ram_detail = _metric_text(ram)
+    disk_readings = [
+        (metric_percent(_mapping_value(disk, "use_percent", None)), disk)
+        for disk in status.disks
+    ]
+    known_disks = [(value, disk) for value, disk in disk_readings if value is not None]
+    if known_disks:
+        disk_percent, fullest = max(known_disks, key=lambda reading: reading[0])
+        disk_detail = (
+            f"最高占用 {_mapping_value(fullest, 'mount', 'disk')} · "
+            f"{_mapping_value(fullest, 'used', '?')} / "
+            f"{_mapping_value(fullest, 'size', '?')} · {_metric_text(disk_percent)}"
+        )
+    else:
+        disk_percent, disk_detail = None, "未知"
+    return [("CPU", cpu, _metric_text(cpu)), ("RAM", ram, ram_detail),
+            ("磁盘", disk_percent, disk_detail)]
+
+
+def _label_props(text: str) -> str:
+    return f"aria-label={json.dumps(text, ensure_ascii=False)}"
+
+
+def _render_chart_slot(value: float | None, series: str) -> None:
+    classes = f"st-gpu-slot st-series-{series}"
+    if value is None:
+        classes += " st-metric-unknown"
+    with ui.element("span").classes(classes).props('aria-hidden="true"'):
+        if value is not None:
+            ui.element("i").style(f"height:{value:.3f}%")
+
+
+def _render_system_summary(status: ServerStatus) -> None:
+    with ui.element("div").classes("st-system-summary"):
+        for label, percent, detail in system_metrics(status):
+            with ui.element("button").classes("st-system-metric").props(
+                f'type="button" {_label_props(f"{label}：{detail}，查看系统详情")}'
+            ).on("click", lambda: open_server_details(status)):
+                ui.label(label)
+                if percent is None:
+                    ui.label("—").classes("st-metric-unavailable")
+                else:
+                    with ui.element("span").classes("st-system-track").props(
+                        'aria-hidden="true"'
+                    ):
+                        ui.element("i").style(f"width:{percent:.3f}%")
+                ui.tooltip(f"{label} · {detail}").classes("st-resource-tooltip")
+
+
 def render_collapsed_summary(status: ServerStatus) -> None:
-    gpu_average = gpu_average_utilization(status)
-    cpu_percent = status.cpu_percent if status.cpu_percent is not None else 0
-    ram_percent = memory_used_percent(status)
+    if not status.online or not status.gpu:
+        with ui.element("div").classes("st-resource-unavailable"):
+            ui.icon("cloud_off" if not status.online else "memory")
+            ui.label("暂未获取指标" if not status.online else "暂无 GPU 指标")
+    else:
+        # Each native button is one device, with both measurements aligned vertically.
+        # Additional GPUs wrap in groups of eight; neither count nor capacity is assumed.
+        with ui.element("div").classes("st-gpu-charts"):
+            for start in range(0, len(status.gpu), 8):
+                group = status.gpu[start:start + 8]
+                with ui.element("div").classes("st-gpu-chart-row"):
+                    with ui.element("div").classes("st-gpu-axis").props('aria-hidden="true"'):
+                        ui.label("计算")
+                        ui.label("显存")
+                    with ui.element("div").classes("st-gpu-columns").style(
+                        f"--st-gpu-count:{len(group)}"
+                    ):
+                        for index, gpu in enumerate(group, start):
+                            util, memory = gpu_metric_values(gpu)
+                            description = (
+                                f"GPU {index} · 计算 {_metric_text(util)} · "
+                                f"显存 {_gpu_memory_text(gpu)}"
+                            )
+                            with ui.element("button").classes("st-gpu-glyph").props(
+                                f'type="button" {_label_props(description)}'
+                            ).on("click", lambda i=index: open_server_details(status, i)):
+                                _render_chart_slot(util, "compute")
+                                _render_chart_slot(memory, "memory")
+                                ui.tooltip(description).classes("st-resource-tooltip")
+    _render_system_summary(status)
 
-    with ui.grid(columns=2).classes("w-full grid-cols-2 gap-4"):
-        with ui.column().classes("w-full gap-2"):
-            with ui.row().classes("items-baseline justify-between w-full"):
-                ui.label("GPU").classes("text-xs uppercase text-grey-6")
-                ui.label(format_percent(gpu_average)).classes("text-lg font-bold")
-            if status.gpu:
-                with ui.grid(columns=2).classes("w-full grid-cols-2 gap-1"):
-                    for gpu in status.gpu:
-                        render_thin_usage_bar(_mapping_value(gpu, "utilization_gpu_percent", 0))
-            else:
-                render_thin_usage_bar(0)
 
-        with ui.column().classes("w-full gap-2"):
-            with ui.row().classes("items-baseline justify-between w-full"):
-                ui.label("CPU").classes("text-xs uppercase text-grey-6")
-                ui.label(format_percent(cpu_percent)).classes("text-lg font-bold")
-            render_thin_usage_bar(cpu_percent)
-            with ui.row().classes("items-baseline justify-between w-full"):
-                ui.label("RAM").classes("text-xs uppercase text-grey-6")
-                ui.label(format_percent(ram_percent)).classes("text-sm font-semibold")
-            render_thin_usage_bar(ram_percent)
+def _render_detail_reading(text: str, percent: float | None, series: str) -> None:
+    with ui.element("div").classes(f"st-detail-reading st-series-{series}"):
+        ui.label(text)
+        if percent is not None:
+            with ui.element("span").classes("st-system-track").props('aria-hidden="true"'):
+                ui.element("i").style(f"width:{percent:.3f}%")
+
+
+def render_server_details(status: ServerStatus, gpu_index: int | None = None) -> None:
+    """Keep exact hardware and system readings available without crowding the overview."""
+    if status.error:
+        ui.label(status.error).classes("st-resource-error")
+    if status.online and status.gpu:
+        models = {str(_mapping_value(gpu, "name", "GPU")) for gpu in status.gpu}
+        mixed_models = len(models) > 1
+        with ui.element("div").classes("st-detail-table-wrap"):
+            with ui.element("table").classes("st-detail-table"):
+                with ui.element("thead"):
+                    with ui.element("tr"):
+                        for label in ("GPU / 型号" if mixed_models else "GPU", "计算利用率", "显存占用"):
+                            with ui.element("th").props('scope="col"'):
+                                ui.label(label)
+                with ui.element("tbody"):
+                    for index, gpu in enumerate(status.gpu):
+                        util, memory = gpu_metric_values(gpu)
+                        with ui.element("tr").classes(
+                            "st-detail-selected" if index == gpu_index else ""
+                        ):
+                            with ui.element("th").props('scope="row"'):
+                                ui.label(f"GPU {index}")
+                                if mixed_models:
+                                    ui.label(str(_mapping_value(gpu, "name", "GPU"))).classes(
+                                        "st-detail-model"
+                                    )
+                            with ui.element("td"):
+                                _render_detail_reading(_metric_text(util), util, "compute")
+                            with ui.element("td"):
+                                _render_detail_reading(_gpu_memory_text(gpu), memory, "memory")
+    else:
+        ui.label("当前 GPU 指标未知").classes("st-resource-unavailable")
+
+    metrics = system_metrics(status)
+    util_values = [gpu_metric_values(gpu)[0] for gpu in status.gpu]
+    # A partial sample is not a trustworthy whole-machine average.
+    average = (
+        sum(util_values) / len(util_values)
+        if status.online and util_values and all(v is not None for v in util_values)
+        else None
+    )
+    fields = [
+        ("SSH alias", status.alias),
+        ("主机名", status.hostname or "未知"),
+        ("连接状态", "在线" if status.online else "离线"),
+        ("GPU 型号", " / ".join(dict.fromkeys(
+            str(_mapping_value(gpu, "name", "GPU")) for gpu in status.gpu
+        )) if status.online and status.gpu else "未知"),
+        ("GPU 平均利用率", _metric_text(average)),
+        ("CPU", metrics[0][2]),
+        ("内存", metrics[1][2]),
+    ]
+    if status.online and status.disks:
+        fields.extend(
+            (
+                f"磁盘 {_mapping_value(disk, 'mount', 'disk')}",
+                f"{_mapping_value(disk, 'used', '?')} / "
+                f"{_mapping_value(disk, 'size', '?')} · "
+                f"{_metric_text(metric_percent(_mapping_value(disk, 'use_percent', None)))}",
+            )
+            for disk in status.disks
+        )
+    else:
+        fields.append(("磁盘", "未知"))
+    with ui.element("dl").classes("st-detail-fields"):
+        for label, text in fields:
+            with ui.element("dt"):
+                ui.label(label)
+            with ui.element("dd"):
+                ui.label(text)
+
+
+def open_server_details(status: ServerStatus, gpu_index: int | None = None) -> None:
+    # Attach to the page, not the refreshed card, so polling cannot close a user's dialog.
+    with ui.context.client.content:
+        owner = ui.element("div").style("display:none")
+    # NiceGUI adds a hidden lifetime canary beside each dialog. Give it an owner
+    # that is deleted on dismissal rather than leaving it on the page indefinitely.
+    with owner:
+        dialog = ui.dialog().props(_label_props(f"{status.alias} 完整信息"))
+        with dialog, ui.card().classes("st-resource-dialog"):
+            with ui.element("header").classes("st-detail-heading"):
+                with ui.column().classes("gap-1 min-w-0"):
+                    ui.label(status.alias).classes("st-detail-title")
+                    ui.label("资源采集快照 · " + gpu_spec(status)).classes("st-detail-subtitle")
+                ui.button("关闭", icon="close", on_click=dialog.close).props(
+                    "flat no-caps"
+                ).classes("st-detail-close")
+            render_server_details(status, gpu_index)
+
+    def dispose() -> None:
+        dialog.delete()
+        owner.delete()
+
+    dialog.on("hide", dispose)
+    dialog.open()
 
 
 def render_server_card(status: ServerStatus) -> None:
-    state = "online" if status.online else "offline"
-    badge_color = "positive" if status.online else "negative"
-    card_classes = "w-full border border-grey-3 shadow-sm"
-    if status.error:
-        state = "error"
-        badge_color = "negative"
-        card_classes += " bg-red-1"
-
-    with ui.card().classes(card_classes):
-        expansion = ui.expansion(value=is_server_expanded(status.alias)).classes("w-full")
-        expansion.on(
-            "update:model-value",
-            lambda event, alias=status.alias: set_server_expanded(alias, bool(event.args)),
-        )
-        with expansion.add_slot("header"):
-            with ui.column().classes("w-full gap-3 cursor-pointer"):
-                with ui.row().classes("items-start justify-between w-full gap-3"):
-                    with ui.column().classes("gap-1"):
-                        ui.label(status.alias).classes("text-xl font-bold")
-                        if status.hostname:
-                            ui.label(f"hostname: {status.hostname}").classes("text-grey-7")
-                    with ui.row().classes("items-center gap-2"):
-                        ui.badge(state, color=badge_color).classes("uppercase")
-                        ui.icon("expand_more").classes("text-grey-6")
-                render_collapsed_summary(status)
-
-        with expansion:
-            if status.error:
-                ui.label(status.error).classes("text-negative font-medium")
-
-            with ui.grid(columns=2).classes("w-full grid-cols-1 xl:grid-cols-2 gap-4"):
-                render_gpu_panel(status)
-                render_system_panel(status)
+    classes = "st-resource-card"
+    if not status.online or status.error:
+        classes += " st-resource-offline"
+    with ui.element("section").classes(classes).props(_label_props(status.alias)):
+        with ui.element("div").classes("st-resource-heading"):
+            ui.element("span").classes("st-online-dot").props(
+                _label_props("在线" if status.online else "离线")
+            )
+            with ui.element("button").classes("st-resource-title").props(
+                f'type="button" {_label_props(f"查看 {status.alias} 完整信息")}'
+            ).on("click", lambda: open_server_details(status)):
+                ui.label(status.alias)
+                ui.icon("chevron_right")
+                ui.tooltip(
+                    f"{status.alias} · {status.hostname or '主机名未知'} · "
+                    f"{'在线' if status.online else '离线'}"
+                ).classes("st-resource-tooltip")
+        ui.label(gpu_spec(status)).classes("st-resource-spec").tooltip(gpu_spec(status))
+        render_collapsed_summary(status)
 
 
 def render_empty_state(container: Any) -> None:
     container.clear()
     with container:
-        with ui.card().classes("w-full"):
-            ui.label("No enabled servers. Add one on the Servers page.").classes("text-grey-7")
+        with ui.element("div").classes("st-dashboard-empty"):
+            ui.icon("dns")
+            ui.label("还没有启用的机器")
+            ui.link("添加或启用机器", "/servers")
 
 
 def render_pending_server_card(alias: str) -> None:
-    with ui.card().classes("w-full border border-grey-3 shadow-sm bg-grey-1"):
-        with ui.row().classes("items-start justify-between w-full gap-3"):
-            ui.label(alias).classes("text-xl font-bold")
-            ui.badge("refreshing", color="warning").classes("uppercase")
-        ui.label("Collecting metrics...").classes("text-grey-7")
+    with ui.element("section").classes("st-resource-card st-resource-pending").props(
+        f'aria-busy="true" {_label_props(alias + " 正在获取指标")}'
+    ):
+        with ui.element("div").classes("st-resource-heading"):
+            ui.element("span").classes("st-online-dot")
+            ui.label(alias).classes("st-resource-title")
+        ui.label("正在连接机器").classes("st-resource-spec")
+        with ui.element("div").classes("st-resource-unavailable"):
+            ui.icon("hourglass_empty")
+            ui.label("正在获取指标…")
+        with ui.element("div").classes("st-system-summary"):
+            for label in ("CPU", "RAM", "磁盘"):
+                ui.label(f"{label} —").classes("st-system-metric")
 
 
 def _render_immediate_statuses(container: Any, aliases: list[str]) -> None:
@@ -364,12 +602,6 @@ def render_results(
 def render_dashboard_page() -> None:
     """Render the home dashboard with periodically refreshed server status."""
 
-    with ui.row().classes("items-center justify-between w-full"):
-        with ui.column().classes("gap-1"):
-            ui.label("Home Dashboard").classes("text-2xl font-bold")
-            ui.label(f"Auto-refreshes every {settings.refresh_seconds}s.").classes("text-grey-7")
-
-    container = ui.column().classes("w-full grid grid-cols-1 lg:grid-cols-2 gap-4")
     refresh_guard = DashboardRefreshGuard()
 
     async def refresh() -> None:
@@ -378,10 +610,12 @@ def render_dashboard_page() -> None:
         if not aliases:
             if refresh_guard.is_current(generation):
                 render_empty_state(container)
+                fleet_summary.set_text("0 台机器")
             return
 
         if refresh_guard.is_current(generation):
             _render_immediate_statuses(container, aliases)
+            fleet_summary.set_text(f"{len(aliases)} 台机器 · 正在刷新")
 
         results = await asyncio.gather(
             *(collect_server_status(alias, SSHClient()) for alias in aliases),
@@ -389,7 +623,27 @@ def render_dashboard_page() -> None:
         )
         if refresh_guard.is_current(generation):
             render_results(container, aliases, results)
+            online = sum(isinstance(result, ServerStatus) and result.online for result in results)
+            fleet_summary.set_text(
+                f"{len(aliases)} 台机器 · {online} 在线 · {len(aliases) - online} 离线"
+            )
 
-    ui.button("Refresh now", on_click=refresh).props("icon=refresh")
-    ui.timer(settings.refresh_seconds, refresh)
-    ui.timer(0, refresh, once=True)
+    with ui.column().classes("st-dashboard"):
+        with ui.row().classes("st-dashboard-heading"):
+            with ui.column().classes("gap-1"):
+                ui.label("资源概览").classes("st-dashboard-title")
+                fleet_summary = ui.label("正在加载机器").classes("st-dashboard-subtitle")
+            ui.button("刷新", icon="refresh", on_click=refresh).props(
+                "outline no-caps"
+            ).classes("st-dashboard-refresh")
+        container = ui.column().classes("st-fleet-grid")
+        with ui.element("footer").classes("st-dashboard-footer"):
+            with ui.element("div").classes("st-dashboard-legend"):
+                for label, series in (("计算", "compute"), ("显存", "memory")):
+                    with ui.element("span").classes("st-legend-item"):
+                        ui.element("i").classes(f"st-series-{series}")
+                        ui.label(label)
+                ui.label("GPU 按序排列 · 悬停或点击查看数值")
+            ui.label(f"每 {settings.refresh_seconds} 秒刷新")
+    create_scoped_timer(container, settings.refresh_seconds, refresh, immediate=False)
+    create_scoped_timer(container, 0, refresh, once=True)

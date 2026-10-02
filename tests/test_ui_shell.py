@@ -8,7 +8,13 @@ import pytest
 
 from app.config import Settings
 from app.db import create_engine_for_settings, init_db, session_scope
-from app.models import Server
+from app.models import Project, ProjectServer, ProjectWorkdir, Server
+
+
+class CallRecorder(list):
+    def __init__(self):
+        super().__init__()
+        self.stack = []
 
 
 class FakeElement:
@@ -17,17 +23,26 @@ class FakeElement:
         self.kind = kind
         self.args = args
         self.kwargs = kwargs
+        self.events = {}
+        self.is_deleted = False
+        self.value = kwargs.get("value")
+        self.children = []
+        self.parent = recorder.stack[-1] if recorder.stack else None
+        if self.parent is not None:
+            self.parent.children.append(self)
         recorder.append((kind, args, kwargs))
 
     def __enter__(self):
+        self.recorder.stack.append(self)
         self.recorder.append((f"enter:{self.kind}", (), {}))
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        assert self.recorder.stack.pop() is self
         self.recorder.append((f"exit:{self.kind}", (), {}))
         return False
 
-    def classes(self, value: str):
+    def classes(self, value: str = "", **kwargs):
         self.recorder.append((f"classes:{self.kind}", (value,), {}))
         return self
 
@@ -35,37 +50,127 @@ class FakeElement:
         self.recorder.append((f"props:{self.kind}", (value,), {}))
         return self
 
+    def style(self, value: str):
+        self.recorder.append((f"style:{self.kind}", (value,), {}))
+        return self
+
+    def set_text(self, text: str):
+        self.args = (text,)
+        self.recorder.append((f"set_text:{self.kind}", (text,), {}))
+        return self
+
+    def tooltip(self, text: str):
+        self.recorder.append((f"tooltip:{self.kind}", (text,), {}))
+        return self
+
+    def on(self, event: str, callback, *args, **kwargs):
+        self.events[event] = callback
+        self.recorder.append((f"on:{self.kind}", (event, callback), kwargs))
+        return self
+
+    def clear(self):
+        for child in tuple(self.children):
+            child.delete()
+        self.recorder.append((f"clear:{self.kind}", (), {}))
+
+    def open(self):
+        self.value = True
+        self.recorder.append((f"open:{self.kind}", (), {}))
+
+    def close(self):
+        self.value = False
+        self.recorder.append((f"close:{self.kind}", (), {}))
+
+    def delete(self):
+        for child in tuple(self.children):
+            child.delete()
+        self.is_deleted = True
+        if self.parent is not None and self in self.parent.children:
+            self.parent.children.remove(self)
+        self.recorder.append((f"delete:{self.kind}", (), {}))
+
+    def toggle(self):
+        self.value = not self.value
+
+    def hide(self):
+        self.value = False
+
+    def add_slot(self, name: str):
+        return FakeElement(self.recorder, f"slot:{name}")
+
 
 class FakeUI:
     def __init__(self):
-        self.calls = []
+        self.calls = CallRecorder()
+        self.elements = []
+        self.context = SimpleNamespace(client=SimpleNamespace(content=FakeElement(self.calls, "content")))
+
+    def _element(self, kind, *args, **kwargs):
+        element = FakeElement(self.calls, kind, *args, **kwargs)
+        self.elements.append(element)
+        return element
+
+    def add_css(self, css: str, **kwargs):
+        self.calls.append(("add_css", (css,), kwargs))
+
+    def add_head_html(self, html: str, **kwargs):
+        self.calls.append(("add_head_html", (html,), kwargs))
 
     def page_title(self, title: str):
         self.calls.append(("page_title", (title,), {}))
 
     def header(self):
-        return FakeElement(self.calls, "header")
+        return self._element("header")
 
     def left_drawer(self, *args, **kwargs):
-        return FakeElement(self.calls, "left_drawer", *args, **kwargs)
+        return self._element("left_drawer", *args, **kwargs)
 
     def column(self):
-        return FakeElement(self.calls, "column")
+        return self._element("column")
 
     def card(self):
-        return FakeElement(self.calls, "card")
+        return self._element("card")
 
     def label(self, text: str):
-        return FakeElement(self.calls, "label", text)
+        return self._element("label", text)
 
     def icon(self, name: str):
-        return FakeElement(self.calls, "icon", name)
+        return self._element("icon", name)
 
     def row(self):
-        return FakeElement(self.calls, "row")
+        return self._element("row")
+
+    def grid(self, *args, **kwargs):
+        return self._element("grid", *args, **kwargs)
+
+    def element(self, *args, **kwargs):
+        return self._element("element", *args, **kwargs)
+
+    def linear_progress(self, *args, **kwargs):
+        return self._element("linear_progress", *args, **kwargs)
+
+    def circular_progress(self, *args, **kwargs):
+        return self._element("circular_progress", *args, **kwargs)
+
+    def badge(self, *args, **kwargs):
+        return self._element("badge", *args, **kwargs)
+
+    def button(self, *args, **kwargs):
+        return self._element("button", *args, **kwargs)
+
+    def dialog(self, *args, **kwargs):
+        # NiceGUI creates a sibling canary which must share the dialog's lifetime owner.
+        self._element("dialog_canary")
+        return self._element("dialog", *args, **kwargs)
+
+    def tooltip(self, *args, **kwargs):
+        return self._element("tooltip", *args, **kwargs)
+
+    def separator(self):
+        return self._element("separator")
 
     def link(self, text: str | None = None, target: str | None = None):
-        return FakeElement(self.calls, "link", text, target)
+        return self._element("link", text, target)
 
 
 def test_app_frame_sets_title_navigation_and_invokes_content(monkeypatch):
@@ -73,28 +178,30 @@ def test_app_frame_sets_title_navigation_and_invokes_content(monkeypatch):
 
     fake_ui = FakeUI()
     monkeypatch.setattr(layout, "ui", fake_ui)
+    monkeypatch.setattr(layout, "_sidebar_projects", lambda: [(42, "Alpha"), (7, "Beta")])
     rendered = []
 
     layout.app_frame("Projects", lambda: rendered.append("content"))
 
-    assert ("page_title", ("gpu-ssh-panel",), {}) in fake_ui.calls
-    assert ("label", ("gpu-ssh-panel",), {}) in fake_ui.calls
-    assert ("label", ("Projects",), {}) in fake_ui.calls
-    assert any(call[0] == "classes:header" and "bg-white" in call[1][0] for call in fake_ui.calls)
-    assert ("classes:label", ("text-lg font-bold",), {}) in fake_ui.calls
-    assert ("classes:label", ("text-sm opacity-70",), {}) in fake_ui.calls
-    assert ("left_drawer", (), {"value": True}) in fake_ui.calls
+    assert ("page_title", ("SuperTerminator",), {}) in fake_ui.calls
+    assert ("label", ("SuperTerminator",), {}) in fake_ui.calls
+    assert ("left_drawer", (), {"value": None}) in fake_ui.calls
     assert any(
         call[0] == "props:left_drawer" and "no-swipe-open" in call[1][0] and "no-swipe-close" in call[1][0]
         for call in fake_ui.calls
     )
-    assert any(call[0] == "classes:left_drawer" and "bg-grey-1" in call[1][0] for call in fake_ui.calls)
-    assert any(call[0] == "classes:link" and "rounded-xl" in call[1][0] for call in fake_ui.calls)
-    assert not any(call[0] == "classes:link" and "transition" in call[1][0] for call in fake_ui.calls)
-    assert ("classes:column", ("w-full p-4 gap-4",), {}) in fake_ui.calls
+    assert any(call[0] == "element" and call[1] == ("main",) for call in fake_ui.calls)
+    assert any(call[0] == "props:element" and "id=st-main" in call[1][0] for call in fake_ui.calls)
     assert [call for call in fake_ui.calls if call[0] == "link"] == [
-        ("link", (None, target), {}) for _label, target, _icon in layout.NAV_ITEMS
+        ("link", (None, "/"), {}),
+        ("link", (None, "/projects"), {}),
+        ("link", (None, "/runs"), {}),
+        ("link", (None, "/servers"), {}),
+        ("link", (None, "/settings"), {}),
+        ("link", (None, "/projects/42"), {}),
+        ("link", (None, "/projects/7"), {}),
     ]
+    assert ("label", ("PROJECTS",), {}) in fake_ui.calls
     assert rendered == ["content"]
 
 
@@ -113,6 +220,31 @@ def test_components_render_empty_state_and_error_label(monkeypatch):
     assert ("classes:label", ("text-grey-7",), {}) in fake_ui.calls
     assert ("label", ("Boom",), {}) in fake_ui.calls
     assert ("classes:label", ("text-negative",), {}) in fake_ui.calls
+
+
+def test_gpu_panel_shows_raw_metrics_without_occupancy_badges(monkeypatch):
+    from app.ui import dashboard
+
+    fake_ui = FakeUI()
+    monkeypatch.setattr(dashboard, "ui", fake_ui)
+    status = SimpleNamespace(
+        gpu=[
+            {
+                "name": "A100",
+                "memory_total_mib": 81920,
+                "memory_used_mib": 1024,
+                "utilization_gpu_percent": 73,
+            }
+        ]
+    )
+
+    dashboard.render_gpu_panel(status)
+
+    labels = [call[1][0] for call in fake_ui.calls if call[0] == "label"]
+    assert "GPU 0 · A100" in labels
+    assert "Util active 73%" in labels
+    assert "Memory 1.0 GiB / 80.0 GiB 1%" in labels
+    assert not any(call[0] == "badge" for call in fake_ui.calls)
 
 
 def test_pages_use_app_frame_and_configured_content(monkeypatch):
@@ -167,31 +299,23 @@ def test_main_initializes_database_and_runs_nicegui_with_settings(monkeypatch):
     ]
 
 
-def test_settings_page_uses_app_frame_and_shows_settings(monkeypatch):
+def test_settings_page_uses_app_frame_and_shows_effective_settings(monkeypatch):
     import app.main as main_module
+    from app.ui import settings as settings_ui
 
     fake_ui = FakeUI()
-    captured = {}
-
-    def fake_app_frame(title, content):
-        captured["title"] = title
-        content()
-
-    monkeypatch.setattr(main_module, "ui", fake_ui)
-    monkeypatch.setattr(main_module, "app_frame", fake_app_frame)
-    monkeypatch.setattr(
-        main_module,
-        "settings",
-        SimpleNamespace(db_path="/tmp/panel.db", refresh_seconds=42, show_debug_terminal=True),
-    )
-
+    monkeypatch.setattr(settings_ui, "ui", fake_ui)
+    monkeypatch.setattr(settings_ui, "load_settings", lambda: SimpleNamespace(
+        db_path=Path("/tmp/panel.db"), refresh_seconds=20,
+        run_output_seconds=4, show_debug_terminal=True,
+    ))
+    captured = []
+    monkeypatch.setattr(main_module, "app_frame", lambda title, content: captured.append((title, content)))
     main_module.settings_page()
-
-    assert captured["title"] == "Settings"
+    assert captured == [("Settings", settings_ui.render_settings_page)]
+    captured[0][1]()
     labels = [call[1][0] for call in fake_ui.calls if call[0] == "label"]
-    assert "Database: /tmp/panel.db" in labels
-    assert "Refresh interval: 42s" in labels
-    assert "Show debug terminal: True" in labels
+    assert {"/tmp/panel.db", "20 秒", "4 秒", "显示"} <= set(labels)
 
 
 def test_servers_module_add_server_trims_upserts_and_enables(tmp_path: Path, monkeypatch):
@@ -219,6 +343,44 @@ def test_servers_module_add_server_trims_upserts_and_enables(tmp_path: Path, mon
     assert reloaded == [True, True]
     assert notices[-1][1]["type"] == "positive"
 
+
+def test_servers_module_remove_server_disables_and_unlinks_projects(tmp_path: Path, monkeypatch):
+    from app.ui import servers
+
+    engine = create_engine_for_settings(Settings(db_path=tmp_path / "app.db"))
+    init_db(engine)
+    notices = []
+    reloaded = []
+    monkeypatch.setattr(
+        servers.ui,
+        "notify",
+        lambda message, **kwargs: notices.append((message, kwargs)),
+    )
+    monkeypatch.setattr(servers.ui.navigate, "reload", lambda: reloaded.append(True))
+
+    with session_scope(engine) as session:
+        project = Project(name="Demo")
+        server = Server(alias="gpu01", enabled=True)
+        session.add_all([project, server])
+        session.flush()
+        link = ProjectServer(project_id=project.id, server_id=server.id, enabled=True)
+        session.add(link)
+        session.flush()
+        session.add(ProjectWorkdir(project_server_id=link.id, path="/data/demo"))
+        server_id = server.id
+
+    assert servers.remove_server(server_id, target_engine=engine) is True
+
+    with session_scope(engine) as session:
+        stored = session.get(Server, server_id)
+        assert stored is not None
+        assert stored.enabled is False
+        assert session.query(ProjectServer).count() == 0
+        assert session.query(ProjectWorkdir).count() == 0
+
+    assert servers._load_managed_servers(target_engine=engine) == []
+    assert reloaded == [True]
+    assert notices[-1] == ("Server 'gpu01' removed.", {"type": "positive"})
 
 def test_servers_module_add_server_rejects_blank_alias(monkeypatch):
     from app.ui import servers
@@ -301,59 +463,28 @@ def test_dashboard_visual_format_helpers():
     assert dashboard.parse_percent_value("46%") == 46.0
 
 
-def test_dashboard_uses_two_column_grid_classes(monkeypatch):
+def test_dashboard_refresh_timers_share_the_resource_container(monkeypatch):
     from app.ui import dashboard
 
-    created = []
+    fake_ui = FakeUI()
+    timers = []
 
-    class FakeElement:
-        def __init__(self, kind):
-            self.kind = kind
-            created.append((kind, None))
+    def fake_scoped_timer(owner, interval, callback, **kwargs):
+        timers.append((owner, interval, callback, kwargs))
+        return None
 
-        def classes(self, value):
-            created.append((f"classes:{self.kind}", value))
-            return self
-
-        def clear(self):
-            created.append((f"clear:{self.kind}", None))
-
-        def props(self, value):
-            created.append((f"props:{self.kind}", value))
-            return self
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class FakeUI:
-        def label(self, *_args, **_kwargs):
-            return FakeElement("label")
-
-        def button(self, *_args, **_kwargs):
-            return FakeElement("button")
-
-        def timer(self, *args, **kwargs):
-            created.append(("timer_args", args, kwargs))
-            return FakeElement("timer")
-
-        def column(self):
-            return FakeElement("column")
-
-        def row(self):
-            return FakeElement("row")
-
-    monkeypatch.setattr(dashboard, "ui", FakeUI())
-
+    monkeypatch.setattr(dashboard, "ui", fake_ui)
+    monkeypatch.setattr(dashboard, "create_scoped_timer", fake_scoped_timer)
     dashboard.render_dashboard_page()
 
-    assert ("classes:column", "w-full grid grid-cols-1 lg:grid-cols-2 gap-4") in created
-    timers = [item for item in created if item[0] == "timer_args"]
-    assert timers[0][1][0] == dashboard.settings.refresh_seconds
-    assert timers[1][1][0] == 0
-    assert timers[1][2]["once"] is True
+    assert len(timers) == 2
+    assert timers[0][0] is timers[1][0]
+    assert timers[0][0] in fake_ui.elements
+    assert timers[0][1] == dashboard.settings.refresh_seconds
+    assert timers[0][3]["immediate"] is False
+    assert timers[1][1] == 0
+    assert timers[1][3]["once"] is True
+    assert timers[0][2] is timers[1][2]
 
 
 @pytest.mark.asyncio
@@ -361,46 +492,17 @@ async def test_dashboard_refresh_renders_immediate_snapshot_before_metrics_retur
     from app.schemas import ServerStatus
     from app.ui import dashboard
 
-    callbacks = {}
+    fake_ui = FakeUI()
     calls = []
     release_collect = asyncio.Event()
-
-    class FakeElement:
-        def classes(self, _value):
-            return self
-
-        def props(self, _value):
-            return self
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class FakeUI:
-        def row(self):
-            return FakeElement()
-
-        def column(self):
-            return FakeElement()
-
-        def label(self, *_args, **_kwargs):
-            return FakeElement()
-
-        def button(self, *_args, **kwargs):
-            callbacks["refresh"] = kwargs["on_click"]
-            return FakeElement()
-
-        def timer(self, *_args, **_kwargs):
-            return FakeElement()
 
     async def slow_collect(alias, _ssh_client):
         calls.append(("collect-start", alias))
         await release_collect.wait()
         return ServerStatus(alias=alias, online=True, cpu_percent=12)
 
-    monkeypatch.setattr(dashboard, "ui", FakeUI())
+    monkeypatch.setattr(dashboard, "ui", fake_ui)
+    monkeypatch.setattr(dashboard, "create_scoped_timer", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(dashboard, "load_enabled_server_aliases", lambda: ["gpu01"])
     monkeypatch.setattr(dashboard, "collect_server_status", slow_collect)
     monkeypatch.setattr(
@@ -415,7 +517,11 @@ async def test_dashboard_refresh_renders_immediate_snapshot_before_metrics_retur
     )
 
     dashboard.render_dashboard_page()
-    task = asyncio.create_task(callbacks["refresh"]())
+    refresh = next(
+        element.kwargs["on_click"] for element in fake_ui.elements
+        if element.kind == "button" and "on_click" in element.kwargs
+    )
+    task = asyncio.create_task(refresh())
     for _ in range(5):
         await asyncio.sleep(0)
         if ("collect-start", "gpu01") in calls:
@@ -433,58 +539,33 @@ async def test_dashboard_refresh_does_not_queue_behind_previous_refresh(monkeypa
     from app.schemas import ServerStatus
     from app.ui import dashboard
 
-    callbacks = {}
+    fake_ui = FakeUI()
     collect_starts = []
     release_collect = asyncio.Event()
-
-    class FakeElement:
-        def classes(self, _value):
-            return self
-
-        def props(self, _value):
-            return self
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class FakeUI:
-        def row(self):
-            return FakeElement()
-
-        def column(self):
-            return FakeElement()
-
-        def label(self, *_args, **_kwargs):
-            return FakeElement()
-
-        def button(self, *_args, **kwargs):
-            callbacks["refresh"] = kwargs["on_click"]
-            return FakeElement()
-
-        def timer(self, *_args, **_kwargs):
-            return FakeElement()
 
     async def slow_collect(alias, _ssh_client):
         collect_starts.append(alias)
         await release_collect.wait()
         return ServerStatus(alias=alias, online=True)
 
-    monkeypatch.setattr(dashboard, "ui", FakeUI())
+    monkeypatch.setattr(dashboard, "ui", fake_ui)
+    monkeypatch.setattr(dashboard, "create_scoped_timer", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(dashboard, "load_enabled_server_aliases", lambda: ["gpu01"])
     monkeypatch.setattr(dashboard, "collect_server_status", slow_collect)
     monkeypatch.setattr(dashboard, "_render_immediate_statuses", lambda _container, _aliases: None)
     monkeypatch.setattr(dashboard, "render_results", lambda _container, _aliases, _results: None)
 
     dashboard.render_dashboard_page()
-    first = asyncio.create_task(callbacks["refresh"]())
+    refresh = next(
+        element.kwargs["on_click"] for element in fake_ui.elements
+        if element.kind == "button" and "on_click" in element.kwargs
+    )
+    first = asyncio.create_task(refresh())
     for _ in range(5):
         await asyncio.sleep(0)
         if len(collect_starts) == 1:
             break
-    second = asyncio.create_task(callbacks["refresh"]())
+    second = asyncio.create_task(refresh())
     for _ in range(5):
         await asyncio.sleep(0)
         if len(collect_starts) == 2:
@@ -515,6 +596,160 @@ def test_dashboard_summary_helpers_format_clean_integer_percentages():
     assert dashboard.gpu_average_utilization(status) == 50.0
     assert dashboard.format_percent(dashboard.gpu_average_utilization(status)) == "50%"
     assert dashboard.format_percent(status.cpu_percent) == "48%"
+
+
+@pytest.mark.parametrize("value", [None, "", "unavailable", float("nan"), float("inf")])
+def test_dashboard_missing_percent_is_unknown_instead_of_idle(value):
+    from app.ui import dashboard
+
+    assert dashboard.metric_percent(value) is None
+    assert dashboard.metric_percent(0) == 0
+
+
+@pytest.mark.parametrize("used,total", [(None, 100), (5, None), (5, 0), (float("nan"), 10)])
+def test_dashboard_missing_capacity_is_unknown_instead_of_empty(used, total):
+    from app.ui import dashboard
+
+    assert dashboard.metric_ratio(used, total) is None
+    assert dashboard.metric_ratio(0, 100) == 0
+    assert dashboard.metric_ratio(25, 100) == 25
+
+
+def test_dashboard_partial_gpu_metrics_preserve_the_available_measurement():
+    from app.ui import dashboard
+
+    assert dashboard.gpu_metric_values({"utilization_gpu_percent": 0}) == (0, None)
+    assert dashboard.gpu_metric_values(
+        {"memory_used_mib": 4096, "memory_total_mib": 8192}
+    ) == (None, 50)
+    assert dashboard.gpu_metric_values({}) == (None, None)
+
+
+@pytest.mark.parametrize("gpu_count", [1, 4, 8, 12])
+def test_dashboard_all_gpus_have_readings_and_their_own_detail_target(monkeypatch, gpu_count):
+    from app.schemas import ServerStatus
+    from app.ui import dashboard
+
+    fake_ui = FakeUI()
+    opened = []
+    status = ServerStatus(
+        alias="gpu01",
+        online=True,
+        gpu=[
+            {"utilization_gpu_percent": index, "memory_used_mib": 4096,
+             "memory_total_mib": 8192}
+            for index in range(gpu_count)
+        ],
+    )
+    monkeypatch.setattr(dashboard, "ui", fake_ui)
+    monkeypatch.setattr(dashboard, "open_server_details", lambda *args: opened.append(args))
+
+    dashboard.render_collapsed_summary(status)
+
+    gpu_buttons = [
+        element for element in fake_ui.elements
+        if element.kind == "element" and element.args == ("button",)
+        and any(child.kind == "tooltip" and child.args[0].startswith("GPU ")
+                for child in element.children)
+    ]
+    assert len(gpu_buttons) == gpu_count
+    for index, button in enumerate(gpu_buttons):
+        tooltip = next(child for child in button.children if child.kind == "tooltip")
+        assert f"GPU {index} · 计算 {index}%" in tooltip.args[0]
+        assert "4.0 GiB / 8.0 GiB" in tooltip.args[0]
+        button.events["click"]()
+    assert opened == [(status, index) for index in range(gpu_count)]
+
+
+def test_dashboard_unknown_and_offline_readings_are_not_shown_as_idle(monkeypatch):
+    from app.schemas import ServerStatus
+    from app.ui import dashboard
+
+    fake_ui = FakeUI()
+    monkeypatch.setattr(dashboard, "ui", fake_ui)
+    dashboard.render_collapsed_summary(ServerStatus(alias="partial", online=True, gpu=[{}]))
+
+    tooltips = [call[1][0] for call in fake_ui.calls if call[0] == "tooltip"]
+    assert "GPU 0 · 计算 未知 · 显存 未知" in tooltips
+    assert not any("0%" in tooltip for tooltip in tooltips)
+    assert not any(call[0] == "style:element" and "height:" in call[1][0]
+                   for call in fake_ui.calls)
+
+    offline = ServerStatus(
+        alias="offline", online=False, gpu=[{"utilization_gpu_percent": 99}],
+        cpu_percent=99, memory={"used_percent": 99},
+        disks=[{"use_percent": "99%"}],
+    )
+    assert all(percent is None for _, percent, _ in dashboard.system_metrics(offline))
+    fake_ui.calls.clear()
+    dashboard.render_collapsed_summary(offline)
+    assert not any(call[0] == "tooltip" and call[1][0].startswith("GPU ")
+                   for call in fake_ui.calls)
+    assert ("label", ("暂未获取指标",), {}) in fake_ui.calls
+
+
+def test_dashboard_details_retain_all_gpu_models_and_disk_mounts(monkeypatch):
+    from app.schemas import ServerStatus
+    from app.ui import dashboard
+
+    fake_ui = FakeUI()
+    monkeypatch.setattr(dashboard, "ui", fake_ui)
+    status = ServerStatus(
+        alias="mixed-gpu", hostname="compute-host", online=True, cpu_percent=12,
+        gpu=[{"name": f"model-{index}", "utilization_gpu_percent": 20,
+              "memory_used_mib": 4096, "memory_total_mib": 8192}
+             for index in range(9)],
+        disks=[{"mount": f"/data/{index}", "used": "1T", "size": "2T", "use_percent": "50%"}
+               for index in range(7)],
+    )
+
+    dashboard.render_server_details(status)
+
+    labels = [call[1][0] for call in fake_ui.calls if call[0] == "label"]
+    assert {"mixed-gpu", "compute-host", "在线", "12%"} <= set(labels)
+    assert {f"GPU {index}" for index in range(9)} <= set(labels)
+    assert {f"model-{index}" for index in range(9)} <= set(labels)
+    assert {f"磁盘 /data/{index}" for index in range(7)} <= set(labels)
+    assert "4.0 GiB / 8.0 GiB" in labels
+    assert "1T / 2T · 50%" in labels
+    assert "混合型号" in dashboard.gpu_spec(status)
+
+
+def test_dashboard_open_details_survive_grid_refresh_and_are_cleaned_up_on_close(monkeypatch):
+    from app.schemas import ServerStatus
+    from app.ui import dashboard
+
+    fake_ui = FakeUI()
+    monkeypatch.setattr(dashboard, "ui", fake_ui)
+    monkeypatch.setattr(dashboard, "_status_cache", {})
+    status = ServerStatus(alias="gpu01", online=True, cpu_percent=12)
+    container = fake_ui.column()
+    dashboard.render_results(container, [status.alias], [status])
+    page = fake_ui.context.client.content
+    initial_page_children = tuple(page.children)
+
+    for _ in range(3):
+        old_card = container.children[0]
+        with old_card:
+            dashboard.open_server_details(status)
+        dialog = next(element for element in reversed(fake_ui.elements) if element.kind == "dialog")
+        owner = dialog.parent
+        canary = next(child for child in owner.children if child.kind == "dialog_canary")
+        assert dialog.value is True
+        assert owner.parent is page
+
+        dashboard.render_results(container, [status.alias], [status])
+
+        assert old_card.is_deleted
+        assert not owner.is_deleted
+        assert not dialog.is_deleted
+        assert dialog.value is True
+        dialog.close()
+        dialog.events["hide"]()
+        assert dialog.is_deleted
+        assert owner.is_deleted
+        assert canary.is_deleted
+        assert tuple(page.children) == initial_page_children
 
 
 def test_dashboard_summary_includes_ram_percent_and_expansion_state():
@@ -640,14 +875,35 @@ def test_layout_sidebar_has_brand_icons_and_active_state(monkeypatch):
     fake_ui = FakeUI()
     monkeypatch.setattr(layout, "ui", fake_ui)
     monkeypatch.setattr(layout, "_current_path", lambda: "/projects/42")
+    monkeypatch.setattr(layout, "_sidebar_projects", lambda: [(42, "Alpha")])
 
     layout.app_frame("Projects", lambda: None)
 
     labels = [call[1][0] for call in fake_ui.calls if call[0] == "label"]
-    assert "GPU SSH Panel" in labels
-    assert "Local SuperTerminal" in labels
+    assert "SuperTerminator" in labels
     assert any(call[0] == "icon" and call[1][0] == "folder_open" for call in fake_ui.calls)
+    assert any(call[0] == "icon" and call[1][0] == "folder" for call in fake_ui.calls)
+    assert "Alpha" in labels
     assert any(
-        call[0] == "classes:link" and "bg-primary" in call[1][0]
+        call[0] == "props:link" and "aria-current=page" in call[1][0]
         for call in fake_ui.calls
     )
+
+
+def test_server_batch_import_preserves_names_and_refreshes_once(tmp_path, monkeypatch):
+    from app.ui import servers
+
+    target = create_engine_for_settings(Settings(db_path=tmp_path / "batch.db"))
+    init_db(target)
+    with session_scope(target) as session:
+        session.add(Server(alias="existing", name="Keep my name", enabled=False))
+    reloaded = []
+    monkeypatch.setattr(servers, "_notify", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(servers.ui.navigate, "reload", lambda: reloaded.append(True))
+    assert servers.import_servers(["existing", " new ", "new", ""], target_engine=target) == 2
+    with session_scope(target) as session:
+        rows = {row.alias: (row.name, row.enabled) for row in session.query(Server).all()}
+    assert rows == {"existing": ("Keep my name", True), "new": ("new", True)}
+    assert reloaded == [True]
+    assert servers.import_servers([], target_engine=target) == 0
+    assert reloaded == [True]

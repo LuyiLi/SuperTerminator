@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from nicegui import ui
+from nicegui import app as nicegui_app, ui
 
 from app.config import load_settings
 from app.db import init_db
@@ -9,9 +9,15 @@ from app.ui.projects import render_project_detail, render_projects_page
 from app.ui.layout import app_frame
 from app.ui.runs import render_run_detail, render_runs_page
 from app.ui.servers import render_servers_page
+from app.ui.settings import render_settings_page
 
 
 settings = load_settings()
+
+# Prefer HTTP long-polling for NiceGUI events. Some local/browser proxy setups
+# show pages over a Tailscale IP but silently break WebSocket upgrades, which
+# makes buttons appear dead because click events never reach the server.
+nicegui_app.config.socket_io_js_transports = ["polling"]
 
 
 @ui.page("/")
@@ -46,12 +52,7 @@ def servers_page() -> None:
 
 @ui.page("/settings")
 def settings_page() -> None:
-    def content() -> None:
-        ui.label(f"Database: {settings.db_path}")
-        ui.label(f"Refresh interval: {settings.refresh_seconds}s")
-        ui.label(f"Show debug terminal: {settings.show_debug_terminal}")
-
-    app_frame("Settings", content)
+    app_frame("Settings", render_settings_page)
 
 
 def main() -> None:

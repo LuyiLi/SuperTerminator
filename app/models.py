@@ -196,6 +196,24 @@ class Run(TimestampMixin, Base):
     tmux_session: Mapped[str] = mapped_column(String(255), default="")
     rendered_command: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="created")
+    is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    training_run_name: Mapped[str] = mapped_column(String(255), default="")
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status_source: Mapped[str] = mapped_column(String(32), default="database")
+    status_detail: Mapped[str] = mapped_column(Text, default="")
+    launch_source: Mapped[str] = mapped_column(String(32), default="ui")
+    request_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    sync_stage: Mapped[str] = mapped_column(String(32), default="")
+    sync_metadata: Mapped[dict[str, Any]] = mapped_column(
+        MutableDict.as_mutable(JSON), default=dict
+    )
+    source_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    launch_preflight_status: Mapped[str] = mapped_column(String(32), default="")
+    launch_preflight_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    launch_preflight_detail: Mapped[str] = mapped_column(Text, default="")
+    last_observed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -203,3 +221,6 @@ class Run(TimestampMixin, Base):
     server: Mapped[Server] = relationship()
     template: Mapped[Template] = relationship()
     preset: Mapped[Preset | None] = relationship()
+
+
+Index("ix_runs_request_key", Run.request_key, unique=True)

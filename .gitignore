@@ -9,3 +9,5 @@ data/app.db-*
 .ruff_cache/
 
 *.egg-info/
+data/code-snapshots/
+data/deploy-backups/

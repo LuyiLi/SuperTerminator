@@ -35,6 +35,11 @@ class FakeSSHClient:
             raise self.raise_on_tmux_start
         if command in self.responses:
             return self.responses[command]
+        for expected, response in self.responses.items():
+            if expected in command:
+                return response
+        if command == "command -v tmux":
+            return CommandResult(0, "/usr/bin/tmux\n", "")
         if command == "echo ok":
             return CommandResult(0, "ok\n", "")
         if command == "hostname":
@@ -49,9 +54,9 @@ class FakeSSHClient:
             return CommandResult(0, "/dev/sda1 7.0T 3.2T 3.8T 46% /data\n", "")
         if command.startswith("tmux new-session"):
             return CommandResult(0, "", "")
-        if command.startswith("tmux capture-pane"):
+        if "tmux capture-pane" in command:
             return CommandResult(0, "line one\nline two\n", "")
-        if command.startswith("tmux kill-session"):
+        if "tmux kill-session" in command:
             return CommandResult(0, "", "")
         return CommandResult(1, "", f"unexpected command: {command}")
 
@@ -255,7 +260,9 @@ async def test_launch_run_creates_run_starts_tmux_and_returns_detached_running_r
     assert fake.commands[-1][0] == "gpu01"
     assert fake.commands[-1][2] == 15
     assert "tmux new-session -d -s gpu-panel-20260613-223000-1" in fake.commands[-1][1]
-    assert "cd /data/demo && python train.py --lr 1e-4 --epochs 2" in fake.commands[-1][1]
+    assert "bash -lc" in fake.commands[-1][1]
+    assert "cd /data/demo" in fake.commands[-1][1]
+    assert "python train.py --lr 1e-4 --epochs 2" in fake.commands[-1][1]
 
     with session_scope(engine) as session:
         stored = session.query(Run).one()
@@ -265,12 +272,15 @@ async def test_launch_run_creates_run_starts_tmux_and_returns_detached_running_r
 
 
 @pytest.mark.asyncio
-async def test_launch_run_marks_status_unknown_when_tmux_start_fails(engine, monkeypatch):
+async def test_launch_run_marks_status_failed_when_tmux_start_fails(engine, monkeypatch):
     monkeypatch.setattr("app.visual_actions.datetime", FixedDateTime)
     project_id, server_id, template_id, _preset_id = _seed_launch_data(engine)
     fake = FakeSSHClient()
+
     async def fail_start(host_alias: str, command: str, timeout: int = 30) -> CommandResult:
         fake.commands.append((host_alias, command, timeout))
+        if command == "command -v tmux":
+            return CommandResult(0, "/usr/bin/tmux\n", "")
         if command.startswith("tmux new-session"):
             return CommandResult(1, "", "tmux failed")
         return CommandResult(1, "", "unexpected")
@@ -288,7 +298,9 @@ async def test_launch_run_marks_status_unknown_when_tmux_start_fails(engine, mon
         form_values={"lr": "1e-4", "epochs": "4"},
     )
 
-    assert run.status == "unknown"
+    assert run.status == "failed"
+    assert run.exit_code == 1
+    assert run.status_detail == "tmux failed"
 
 
 @pytest.mark.asyncio
@@ -314,7 +326,82 @@ async def test_launch_run_marks_status_unknown_and_reraises_when_tmux_start_rais
 
     with session_scope(engine) as session:
         stored = session.query(Run).one()
-        assert stored.status == "unknown"
+    assert stored.status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_launch_run_uses_nohup_when_tmux_missing(engine, monkeypatch):
+    monkeypatch.setattr("app.visual_actions.datetime", FixedDateTime)
+    project_id, server_id, template_id, _preset_id = _seed_launch_data(engine)
+
+    class NoTMUXFakeClient(FakeSSHClient):
+        async def run(self, host_alias: str, command: str, timeout: int = 30) -> CommandResult:
+            self.commands.append((host_alias, command, timeout))
+            if command == "command -v tmux":
+                return CommandResult(1, "", "not found")
+            if command.startswith("mkdir -p $HOME/.gpu-ssh-panel/runs"):
+                return CommandResult(0, "", "")
+            return await super().run(host_alias, command, timeout)
+
+    fake = NoTMUXFakeClient()
+    run = await launch_run(
+        engine=engine,
+        ssh_client=fake,
+        project_id=project_id,
+        server_id=server_id,
+        template_id=template_id,
+        preset_id=None,
+        workdir="/data/demo",
+        run_name="no tmux run",
+        form_values={"lr": "1e-4", "epochs": "4"},
+    )
+
+    assert run.status == "running"
+    assert run.tmux_session == "nohup-1"
+    assert run.rendered_command == "python train.py --lr 1e-4 --epochs 4"
+    assert fake.commands[-1][0] == "gpu01"
+    assert "nohup" in fake.commands[-1][1]
+    assert "tmux new-session" not in fake.commands[-1][1]
+    assert "cd /data/demo" in fake.commands[-1][1]
+    assert "python train.py --lr 1e-4 --epochs 4" in fake.commands[-1][1]
+    assert "mkdir -p $HOME/.gpu-ssh-panel/runs" in fake.commands[-1][1]
+    assert '$HOME/.gpu-ssh-panel/runs/1' in fake.commands[-1][1]
+    assert "output.log" in fake.commands[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_capture_run_output_for_nohup_session_returns_log_tail(engine):
+    class NoHupCaptureFake(FakeSSHClient):
+        async def run(self, host_alias: str, command: str, timeout: int = 30) -> CommandResult:
+            self.commands.append((host_alias, command, timeout))
+            if command.startswith("if [ -f ") and "nohup-1.log" in command:
+                return CommandResult(0, "a\nb\n", "")
+            return await super().run(host_alias, command, timeout)
+
+    fake = NoHupCaptureFake()
+
+    output = await capture_run_output("gpu01", "nohup-1", fake, lines=50)
+
+    assert output == "a\nb\n"
+
+
+@pytest.mark.asyncio
+async def test_stop_run_stops_nohup_session():
+    class NoHupStopFake(FakeSSHClient):
+        async def run(self, host_alias: str, command: str, timeout: int = 30) -> CommandResult:
+            self.commands.append((host_alias, command, timeout))
+            if command.startswith("if [ -f ") and "nohup-1.pid" in command:
+                return CommandResult(0, "", "")
+            return await super().run(host_alias, command, timeout)
+
+    fake = NoHupStopFake()
+
+    result = await stop_run("gpu01", "nohup-1", fake)
+
+    assert result == (True, "stopped")
+    assert '$HOME/.gpu-ssh-panel/runs/1/pid' in fake.commands[0][1]
+    assert "nohup-1.pid" in fake.commands[0][1]
+    assert "pkill -TERM -P" in fake.commands[0][1]
 
 
 @pytest.mark.asyncio
@@ -511,9 +598,11 @@ async def test_capture_run_output_returns_stdout_and_honors_line_count():
     output = await capture_run_output("gpu01", "gpu-panel-20260613-223000-1", fake, lines=50)
 
     assert output == "line one\nline two\n"
-    assert fake.commands == [
-        ("gpu01", "tmux capture-pane -t gpu-panel-20260613-223000-1 -p -S -50", 10)
-    ]
+    assert len(fake.commands) == 1
+    assert fake.commands[0][0] == "gpu01"
+    assert "$HOME/.gpu-ssh-panel/runs/1/output.log" in fake.commands[0][1]
+    assert "tmux capture-pane -t gpu-panel-20260613-223000-1 -p -S -50" in fake.commands[0][1]
+    assert fake.commands[0][2] == 10
 
 
 @pytest.mark.asyncio
@@ -530,7 +619,7 @@ async def test_capture_run_output_returns_stderr_or_not_found_message_on_failure
 
 
 @pytest.mark.asyncio
-async def test_capture_run_output_marks_run_exited_when_session_missing(engine):
+async def test_capture_run_output_does_not_guess_terminal_state_when_session_missing(engine):
     project_id, server_id, template_id, _preset_id = _seed_launch_data(engine)
     with session_scope(engine) as session:
         run = Run(
@@ -562,8 +651,8 @@ async def test_capture_run_output_marks_run_exited_when_session_missing(engine):
     assert output == "no such session"
     with session_scope(engine) as session:
         stored = session.get(Run, run_id)
-        assert stored.status == "exited"
-        assert stored.ended_at is not None
+        assert stored.status == "running"
+        assert stored.ended_at is None
 
 
 @pytest.mark.asyncio
@@ -573,7 +662,11 @@ async def test_stop_run_kills_tmux_session_and_reports_stopped():
     result = await stop_run("gpu01", "gpu-panel-20260613-223000-1", fake)
 
     assert result == (True, "stopped")
-    assert fake.commands == [("gpu01", "tmux kill-session -t gpu-panel-20260613-223000-1", 10)]
+    assert len(fake.commands) == 1
+    assert fake.commands[0][0] == "gpu01"
+    assert "tmux kill-session -t gpu-panel-20260613-223000-1" in fake.commands[0][1]
+    assert '"stopped"' in fake.commands[0][1]
+    assert fake.commands[0][2] == 10
 
 
 @pytest.mark.asyncio

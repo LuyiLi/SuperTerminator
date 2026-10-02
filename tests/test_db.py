@@ -221,3 +221,86 @@ def test_init_db_migrates_existing_project_workdir_default_index(tmp_path: Path)
     with pytest.raises(IntegrityError):
         with session_scope(engine) as session:
             session.add(ProjectWorkdir(project_server_id=1, path="/data/three", label="three", is_default=True))
+
+
+def test_init_db_migrates_existing_run_favorites_column(tmp_path: Path):
+    from sqlalchemy import create_engine, text
+
+    db_path = tmp_path / "legacy-runs.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with legacy_engine.begin() as conn:
+        conn.execute(text("CREATE TABLE runs (id INTEGER PRIMARY KEY, name VARCHAR(255))"))
+        conn.execute(text("INSERT INTO runs (id, name) VALUES (1, 'old')"))
+    legacy_engine.dispose()
+
+    engine = create_engine_for_settings(Settings(db_path=db_path))
+    init_db(engine)
+
+    with engine.connect() as conn:
+        columns = [row[1] for row in conn.execute(text("PRAGMA table_info(runs)"))]
+        favorite = conn.execute(text("SELECT is_favorite FROM runs WHERE id = 1")).scalar_one()
+
+    assert "is_favorite" in columns
+    assert favorite == 0
+
+
+def test_init_db_migrates_run_observability_and_backfills_training_name(tmp_path: Path):
+    from sqlalchemy import create_engine, text
+
+    db_path = tmp_path / "legacy-observability.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with legacy_engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE runs ("
+                "id INTEGER PRIMARY KEY, name VARCHAR(255), rendered_command TEXT)"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO runs (id, name, rendered_command) VALUES "
+                "(1, 'copy of old', 'python train.py --run_name=actual_name')"
+            )
+        )
+    legacy_engine.dispose()
+
+    engine = create_engine_for_settings(Settings(db_path=db_path))
+    init_db(engine)
+    # Running migrations repeatedly must be safe.
+    init_db(engine)
+
+    with engine.connect() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(runs)"))}
+        row = conn.execute(
+            text(
+                "SELECT training_run_name, exit_code, status_source, status_detail, "
+                "launch_source, source_run_id, launch_preflight_status, "
+                "launch_preflight_observed_at, launch_preflight_detail, "
+                "last_observed_at FROM runs WHERE id = 1"
+            )
+        ).one()
+
+    assert {
+        "training_run_name",
+        "exit_code",
+        "status_source",
+        "status_detail",
+        "launch_source",
+        "source_run_id",
+        "launch_preflight_status",
+        "launch_preflight_observed_at",
+        "launch_preflight_detail",
+        "last_observed_at",
+    } <= columns
+    assert row == (
+        "actual_name",
+        None,
+        "database",
+        "",
+        "ui",
+        None,
+        "",
+        None,
+        "",
+        None,
+    )

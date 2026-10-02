@@ -1,0 +1,45 @@
+/* Shared inner-page rhythm. Dashboard metrics keep their own layout. */
+.st-page-header { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; width:100%; flex-wrap:wrap; margin-bottom:4px; }
+.st-page-title { font-size:24px; font-weight:600; letter-spacing:-.6px; line-height:1.35; color:var(--st-ink); overflow-wrap:anywhere; }
+.st-page-subtitle { color:var(--st-muted); font-size:12px; line-height:1.6; margin-top:5px; }
+.st-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.st-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; width:100%; }
+.st-main .st-panel { width:100%; min-width:0; background:var(--st-panel); border:1px solid var(--st-line); border-radius:var(--st-radius); box-shadow:none; }
+.st-main .st-panel-title { font-size:15px; font-weight:600; color:var(--st-ink); }
+.st-main .st-primary { background:var(--st-ink)!important; color:var(--st-panel)!important; }
+.st-main .st-secondary { color:var(--st-ink)!important; }
+.st-main .st-secondary.q-btn--outline::before { border-color:var(--st-line); }
+.st-muted { color:var(--st-muted); font-size:12px; }
+.st-mono { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
+.st-empty { width:100%; padding:40px 24px; display:flex; flex-direction:column; align-items:center; text-align:center; gap:10px; color:var(--st-muted); }
+.st-manage-list { padding:4px 20px; }
+.st-manage-row { width:100%; min-width:0; display:flex; align-items:center; justify-content:space-between; gap:20px; padding:20px 0; border-bottom:1px solid var(--st-line); flex-wrap:wrap; }
+.st-manage-row:last-child { border-bottom:0; }
+.st-manage-row > .q-col { min-width:0; }
+.st-manage-identity { gap:5px; min-width:0; flex:1; }
+.st-manage-name { font-size:14px; font-weight:550; overflow-wrap:anywhere; }
+.st-manage-status { font-size:11px; color:var(--st-muted); display:flex; align-items:center; gap:6px; }
+.st-manage-status .q-icon { font-size:13px; color:var(--st-ok); }
+.st-dialog { width:480px; max-width:calc(100vw - 32px)!important; padding:24px; gap:18px; border:1px solid var(--st-line); border-radius:12px!important; box-shadow:0 18px 80px #18223120; color:var(--st-ink); }
+.st-dialog-title { font-size:18px; font-weight:600; letter-spacing:-.3px; }
+.st-dialog-body { color:var(--st-muted); font-size:13px; line-height:1.7; white-space:pre-line; overflow-wrap:anywhere; }
+.st-dialog .q-field { width:100%; font-size:13px; }
+.st-dialog .st-actions { width:100%; justify-content:flex-end; }
+.st-dialog .q-btn { text-transform:none; border-radius:7px; font-size:12px; }
+.st-dialog .st-primary { background:var(--st-ink)!important; color:var(--st-panel)!important; }
+.st-import-options { width:100%; gap:4px; max-height:340px; overflow-y:auto; }
+.st-settings-panel { padding:24px; max-width:900px; gap:0; }
+.st-setting-row { display:grid; grid-template-columns:155px minmax(0,1fr); gap:20px; width:100%; padding:18px 0; border-bottom:1px solid var(--st-line); align-items:start; }
+.st-setting-row:last-child { border:0; }
+.st-setting-label { color:var(--st-muted); font-size:12px; }
+.st-setting-value { color:var(--st-ink); overflow-wrap:anywhere; font-size:13px; }
+@media(max-width:767px) {
+  .st-page-title { font-size:22px; }
+  .st-page-header { gap:12px; }
+  .st-manage-list { padding:0 16px; }
+  .st-manage-row { gap:12px; padding:17px 0; }
+  .st-manage-row > .st-actions { width:100%; justify-content:flex-start; }
+  .st-dialog { padding:20px; }
+  .st-setting-row { grid-template-columns:1fr; gap:6px; }
+  .st-main .st-actions .q-btn { min-height:38px; }
+}
