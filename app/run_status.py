@@ -42,6 +42,7 @@ _INSPECTION_BATCH_SIZE = 20
 
 _PROGRESS_PATTERNS: dict[str, re.Pattern[str]] = {
     "iteration": re.compile(r"Learning iteration\s+(\d+)\s*/\s*(\d+)"),
+    "epoch": re.compile(r"\bepoch\s*=\s*(\d+)\s*/\s*(\d+)\b", re.IGNORECASE),
     "run_name": re.compile(r"Run name:\s*(.+?)\s*$", re.MULTILINE),
     "elapsed": re.compile(r"Time elapsed:\s*(.+?)\s*$", re.MULTILINE),
     "eta": re.compile(r"ETA:\s*(.+?)\s*$", re.MULTILINE),
@@ -56,19 +57,28 @@ def _last_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
 
 
 def parse_training_progress(output: str) -> dict[str, Any]:
-    """Parse optional RSL-RL progress fields from recent console output."""
+    """Parse recorded iteration or epoch progress without inferring batch progress."""
 
     text = str(output or "")
     progress: dict[str, Any] = {}
 
     iteration = _last_match(_PROGRESS_PATTERNS["iteration"], text)
-    if iteration:
-        current = int(iteration.group(1))
-        total = int(iteration.group(2))
+    epoch = _last_match(_PROGRESS_PATTERNS["epoch"], text)
+    reading = max(
+        (match for match in (iteration, epoch) if match),
+        key=lambda match: match.start(),
+        default=None,
+    )
+    if reading:
+        current = int(reading.group(1))
+        total = int(reading.group(2))
+        current_key, total_key = (
+            ("epoch", "max_epochs") if reading is epoch else ("iteration", "max_iterations")
+        )
         progress.update(
             {
-                "iteration": current,
-                "max_iterations": total,
+                current_key: current,
+                total_key: total,
                 "percent": round((current / total) * 100, 2) if total else None,
             }
         )

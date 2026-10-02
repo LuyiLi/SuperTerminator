@@ -153,7 +153,11 @@ async def refresh_run_output(
             output.value = captured
             if progress_target is not None:
                 progress = parse_training_progress(captured)
-                if progress.get("iteration") is not None:
+                if progress.get("epoch") is not None:
+                    text = progress_summary(progress)
+                    if progress.get("eta"):
+                        text += f" · ETA {progress['eta']}"
+                elif progress.get("iteration") is not None:
                     text = (
                         f"Iteration {progress['iteration']} / {progress['max_iterations']} "
                         f"({progress.get('percent', 0):.2f}%)"
@@ -244,10 +248,13 @@ def run_gpu_label(run: dict[str, Any]) -> str:
 
 
 def progress_summary(progress: dict[str, Any]) -> str:
-    if progress.get("iteration") is None:
+    if progress.get("epoch") is not None:
+        current, total, unit = progress["epoch"], progress.get("max_epochs"), "epochs"
+    elif progress.get("iteration") is not None:
+        current, total, unit = progress["iteration"], progress.get("max_iterations"), "iterations"
+    else:
         return "尚未取得进度"
-    current, total = progress["iteration"], progress.get("max_iterations")
-    text = f"{current:,} / {total:,} iterations" if isinstance(total, int) else f"{current:,} iterations"
+    text = f"{current:,} / {total:,} {unit}" if isinstance(total, int) else f"{current:,} {unit}"
     percent = progress.get("percent")
     if isinstance(percent, (int, float)):
         text += f" · {percent:g}%"
@@ -276,7 +283,11 @@ class RunOutputSnapshot:
         self.error = ""
         self.collected_at = datetime.now().strftime("%H:%M:%S")
         # A short tail may no longer contain the last progress line. Keep that evidence.
-        self.progress.update(parse_training_progress(output))
+        parsed = parse_training_progress(output)
+        if "iteration" in parsed or "epoch" in parsed:
+            for key in ("iteration", "max_iterations", "epoch", "max_epochs"):
+                self.progress.pop(key, None)
+        self.progress.update(parsed)
 
 
 def parse_workbench_context(query: Any) -> dict[str, Any]:

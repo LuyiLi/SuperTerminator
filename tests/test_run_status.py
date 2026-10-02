@@ -216,6 +216,36 @@ Steps per second: 12345
     }
 
 
+def test_parse_training_progress_uses_latest_epoch_without_including_local_batch_step():
+    output = (
+        "2026-10-02 14:30:00,100 epoch=31/100 step=2785/2785 loss=0.025\n"
+        "2026-10-02 14:34:04,616 epoch=32/100 step=1900/2785 loss=0.023205\n"
+    )
+
+    assert parse_training_progress(output) == {
+        "epoch": 32,
+        "max_epochs": 100,
+        "percent": 32.0,
+    }
+    assert parse_training_progress("step=1900/2785 loss=0.023205") == {}
+
+
+@pytest.mark.parametrize("current,total,percent", [(0, 100, 0.0), (32, 0, None)])
+def test_parse_epoch_progress_preserves_raw_counter_and_handles_missing_total(current, total, percent):
+    assert parse_training_progress(f"epoch={current}/{total} step=99/100") == {
+        "epoch": current, "max_epochs": total, "percent": percent,
+    }
+
+
+def test_parse_training_progress_uses_latest_recognized_counter_type():
+    assert parse_training_progress("Learning iteration 7/20\nepoch=32/100") == {
+        "epoch": 32, "max_epochs": 100, "percent": 32.0,
+    }
+    assert parse_training_progress("epoch=32/100\nLearning iteration 7/20") == {
+        "iteration": 7, "max_iterations": 20, "percent": 35.0,
+    }
+
+
 @pytest.mark.asyncio
 async def test_tail_training_run_returns_progress_and_name_mismatch_warning(engine):
     run_id = _seed_run(engine, run_id_hint="configured")

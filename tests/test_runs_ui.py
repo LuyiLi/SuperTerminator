@@ -237,6 +237,22 @@ def test_workbench_return_context_round_trip_and_invalid_values():
     assert parse_workbench_context({"run": "-1", "project": "abc", "filter": "anything", "tab": "bad"}) == {}
 
 
+def test_workbench_progress_uses_recorded_epoch_unit_and_preserves_iteration_labels():
+    from app.ui.runs import RunOutputSnapshot, progress_summary
+
+    snapshot = RunOutputSnapshot()
+    snapshot.accept("Learning iteration 5/20")
+    assert progress_summary(snapshot.progress) == "5 / 20 iterations · 25%"
+    snapshot.accept("2026-10-02 14:34:04,616 epoch=32/100 step=1900/2785 loss=0.023205")
+    assert progress_summary(snapshot.progress) == "32 / 100 epochs · 32%"
+    assert "iteration" not in snapshot.progress
+    snapshot.accept("later log output without a progress line")
+    assert progress_summary(snapshot.progress) == "32 / 100 epochs · 32%"
+    snapshot.accept("Learning iteration 10/20")
+    assert progress_summary(snapshot.progress) == "10 / 20 iterations · 50%"
+    assert "epoch" not in snapshot.progress
+
+
 @pytest.mark.asyncio
 async def test_workbench_capture_error_preserves_last_real_output_and_progress():
     from app.ui.runs import RunOutputSnapshot, RunOutputRefreshGuard, capture_workbench_output
