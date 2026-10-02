@@ -13,7 +13,7 @@ from sqlalchemy import Engine, desc
 from sqlalchemy.orm import joinedload
 
 from app.db import engine, session_scope
-from app.models import Run
+from app.models import Run, Server
 from app.run_config import extract_training_config, training_display_name
 from app.run_runtime import TERMINAL_STATES, runtime_dir, validate_run_id
 from app.runs import build_tmux_has_session_command
@@ -38,6 +38,7 @@ RUN_STATES = frozenset(
 )
 ATTENTION_STATES = frozenset({"failed", "lost", "unknown"})
 FINISHED_STATES = frozenset({"succeeded", "stopped", "finished_unknown"})
+SERVER_ACTIVE_STATES = frozenset({"created", "preparing", "starting", "running", "unknown"})
 _INSPECTION_BATCH_SIZE = 20
 
 _PROGRESS_PATTERNS: dict[str, re.Pattern[str]] = {
@@ -196,6 +197,22 @@ def list_run_records(
                 continue
         filtered.append(record)
     return filtered
+
+
+def list_server_active_runs(
+    server_alias: str, *, target_engine: Engine = engine
+) -> list[dict[str, Any]]:
+    """Load all active/uncertain runs for exactly one host, regardless of history size."""
+    with session_scope(target_engine) as session:
+        runs = (
+            session.query(Run)
+            .join(Run.server)
+            .options(joinedload(Run.project), joinedload(Run.server))
+            .filter(Server.alias == server_alias, Run.status.in_(SERVER_ACTIVE_STATES))
+            .order_by(desc(Run.id))
+            .all()
+        )
+        return [_serialize_run(run) for run in runs]
 
 
 def get_run_record(run_id: int, *, target_engine: Engine = engine) -> dict[str, Any] | None:

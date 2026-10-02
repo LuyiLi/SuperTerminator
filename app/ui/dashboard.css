@@ -57,6 +57,24 @@ button.st-resource-title:hover { color: var(--st-accent); }
 .st-detail-title { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
 .st-detail-subtitle { font-size: 11px; color: var(--st-muted); overflow-wrap: anywhere; }
 .st-detail-close { color: var(--st-muted) !important; font-size: 12px; flex: none; }
+.st-server-tasks { width: 100%; margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--st-line); }
+.st-server-tasks-heading, .st-server-task-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.st-server-tasks-title { font-size: 13px; font-weight: 600; }
+.st-server-tasks-count { color: var(--st-muted); font-size: 12px; }
+.st-server-tasks-note { margin-top: 4px; color: var(--st-muted); font-size: 11px; }
+.st-server-task-list { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
+.st-server-task { padding: 12px 0; border-bottom: 1px solid var(--st-line); }
+.st-server-task:last-child { border-bottom: 0; }
+.st-server-task-name { min-width: 0; color: var(--st-ink); font-size: 13px; font-weight: 500; line-height: 1.5; overflow-wrap: anywhere; text-decoration: none; }
+.st-server-task-name:hover { color: var(--st-compute); text-decoration: underline; }
+.st-server-task-name:focus-visible { outline: 2px solid var(--st-compute); outline-offset: 3px; border-radius: 2px; }
+.st-server-task-state { flex: none; padding: 2px 7px; border-radius: 4px; font-size: 11px; background: var(--st-soft); }
+.st-server-task-state.st-task-running { color: #247056; background: #eaf5ef; }
+.st-server-task-state.st-task-unknown { color: var(--st-warn); background: #fbf3e6; }
+.st-server-task-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 6px; color: var(--st-muted); font-size: 11px; overflow-wrap: anywhere; }
+.st-server-task-gpus { color: var(--st-compute); font-variant-numeric: tabular-nums; }
+.st-server-task-config, .st-server-task-started { margin-top: 4px; color: var(--st-muted); font-size: 11px; overflow-wrap: anywhere; }
+.st-server-tasks-empty { padding: 16px 0 10px; color: var(--st-muted); font-size: 12px; }
 .st-detail-table-wrap { width: 100%; }
 .st-detail-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; font-variant-numeric: tabular-nums; }
 .st-detail-table th { text-align: left; font-weight: 500; }

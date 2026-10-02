@@ -16,6 +16,7 @@ from app.schemas import ServerStatus
 from app.ssh_client import SSHClient
 from app.visual_actions import collect_server_status
 from app.ui.scoped_timer import create_scoped_timer
+from app.ui.server_tasks import ServerTasksPanel
 
 settings = load_settings()
 _expanded_servers: set[str] = set()
@@ -517,6 +518,7 @@ def open_server_details(status: ServerStatus, gpu_index: int | None = None) -> N
                 ui.button("关闭", icon="close", on_click=dialog.close).props(
                     "flat no-caps"
                 ).classes("st-detail-close")
+            ServerTasksPanel(status.alias)
             render_server_details(status, gpu_index)
 
     def dispose() -> None:

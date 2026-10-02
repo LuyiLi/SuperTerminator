@@ -859,6 +859,7 @@ def test_dashboard_open_details_survive_grid_refresh_and_are_cleaned_up_on_close
     fake_ui = FakeUI()
     monkeypatch.setattr(dashboard, "ui", fake_ui)
     monkeypatch.setattr(dashboard, "_status_cache", {})
+    monkeypatch.setattr(dashboard, "ServerTasksPanel", lambda _alias: None)
     status = ServerStatus(alias="gpu01", online=True, cpu_percent=12)
     container = fake_ui.column()
     dashboard.render_results(container, [status.alias], [status])
