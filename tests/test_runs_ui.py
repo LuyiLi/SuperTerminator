@@ -304,6 +304,7 @@ def native_workbench(monkeypatch):
     monkeypatch.setattr(runs, "create_scoped_timer", lambda *args, **kwargs: timers.append((args, kwargs)))
     with client:
         controller = runs.render_run_workbench()
+    client.tab_id = "test-connected-tab"
     yield controller, client, records, timers
     client.delete()
 
@@ -441,3 +442,258 @@ def test_native_workbench_config_refresh_retains_expanded_provenance(native_work
         controller.render_inspector()
     assert controller.refs["full_name"].value is True
     assert controller.refs["config_more"].value is True
+
+
+def test_repeated_output_sends_no_log_list_or_filter_updates(native_workbench):
+    from app.ui import runs
+    controller, client, _records, _timers = native_workbench
+    snapshot = runs.RunOutputSnapshot()
+    snapshot.accept("Learning iteration 25/100\n" + "\n".join(f"line {i}" for i in range(20)))
+    controller.state.outputs[1] = snapshot
+    with client:
+        controller.update_inspector()
+        controller.render_list()
+        controller.render_filters()
+    row_ids = {key: refs["button"].id for key, refs in controller.list_refs.items()}
+    client.outbox.updates.clear()
+    with client:
+        controller.update_inspector()
+        controller.render_list()
+        controller.render_filters()
+    assert not client.outbox.updates
+    assert {key: refs["button"].id for key, refs in controller.list_refs.items()} == row_ids
+
+
+def test_progress_changes_update_existing_row_instead_of_rebuilding_list(native_workbench):
+    from app.ui import runs
+    controller, client, _records, _timers = native_workbench
+    rows = {run_id: refs["button"] for run_id, refs in controller.list_refs.items()}
+    snapshot = controller.state.outputs[1] = runs.RunOutputSnapshot()
+    snapshot.accept("Learning iteration 26/100")
+    client.outbox.updates.clear()
+    with client:
+        controller.render_list()
+    assert all(controller.list_refs[key]["button"] is button for key, button in rows.items())
+    assert controller.list_container.id not in client.outbox.updates
+    assert rows[1].id not in client.outbox.updates
+    assert controller.list_refs[1]["progress"].text == "26 / 100 iterations · 26%"
+    assert controller.list_refs[1]["progress"].id in client.outbox.updates
+
+
+def test_overview_sends_short_tail_and_full_output_has_utf8_byte_limit(native_workbench):
+    from app.ui import runs
+    controller, client, _records, _timers = native_workbench
+    snapshot = controller.state.outputs[1] = runs.RunOutputSnapshot()
+    output = "\n".join(f"line {i}: " + "训练日志" * 150 for i in range(320))
+    snapshot.accept(output)
+    client.outbox.updates.clear()
+    with client:
+        controller.update_inspector()
+    preview = controller.refs["output"].text
+    assert preview.endswith("训练日志")
+    assert len(preview.encode("utf-8")) <= runs.PREVIEW_MAX_BYTES
+    assert len(preview.splitlines()) <= runs.PREVIEW_VISIBLE_LINES
+    assert "line 0:" not in preview
+    with client:
+        controller.set_tab("logs")
+    full = controller.refs["output"].text
+    assert len(full.encode("utf-8")) <= runs.FULL_OUTPUT_MAX_BYTES
+    assert len(full.splitlines()) <= runs.FULL_CAPTURE_LINES
+    assert "\ufffd" not in full
+    assert len(full) > len(preview)
+    assert snapshot.full_value == output
+
+
+@pytest.mark.asyncio
+async def test_capture_size_follows_visible_view_and_configuration_skips_log_sampling(native_workbench, monkeypatch):
+    from app.ui import runs
+    controller, client, records, _timers = native_workbench
+    requested = []
+
+    async def capture(*_args, **kwargs):
+        requested.append((kwargs["run_id"], kwargs["lines"]))
+        return "actual output"
+
+    monkeypatch.setattr(runs, "capture_run_output", capture)
+    with client:
+        await controller._capture(records[0])
+        controller.set_tab("logs")
+        await controller._capture(records[0])
+        await controller._capture(records[1])
+        controller.set_tab("config")
+        await controller.refresh_selected_output()
+        await controller._capture(records[0])
+    assert requested == [(1, runs.SUMMARY_CAPTURE_LINES), (1, runs.FULL_CAPTURE_LINES),
+                         (2, runs.SUMMARY_CAPTURE_LINES)]
+
+
+@pytest.mark.parametrize("suspension", ["disconnect", "ancestor_hidden", "browser_hidden"])
+@pytest.mark.asyncio
+async def test_disconnected_or_hidden_workbench_does_not_poll_or_enqueue_ui(native_workbench, monkeypatch, suspension):
+    from app.ui import runs
+    controller, client, _records, _timers = native_workbench
+    snapshot = controller.state.outputs[1] = runs.RunOutputSnapshot(value="last output")
+    if suspension == "disconnect":
+        client.tab_id = None
+    elif suspension == "ancestor_hidden":
+        controller.root.parent_slot.parent.set_visibility(False)
+    else:
+        client.st_page_visible = False
+    monkeypatch.setattr(controller, "_load_records", lambda: pytest.fail("must not reload while hidden/disconnected"))
+    client.outbox.updates.clear()
+    with client:
+        await controller.refresh_status()
+        await controller.refresh_selected_output()
+    assert not client.outbox.updates
+    assert controller.state.outputs[1] is snapshot
+    assert snapshot.value == "last output"
+    assert controller.state.selected_id == 1
+
+
+@pytest.mark.asyncio
+async def test_inflight_output_is_cached_without_ui_push_after_disconnect_and_restored_on_resume(native_workbench, monkeypatch):
+    from app.ui import runs
+    controller, client, records, _timers = native_workbench
+    started, release = asyncio.Event(), asyncio.Event()
+    resumed = []
+
+    async def capture(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return "new actual output"
+
+    async def refresh_status():
+        resumed.append(True)
+
+    monkeypatch.setattr(runs, "capture_run_output", capture)
+    with client:
+        first = asyncio.create_task(controller.refresh_selected_output())
+        await started.wait()
+        client.tab_id = None
+        client.outbox.updates.clear()
+        release.set()
+        await first
+        assert controller.state.outputs[1].value == "new actual output"
+        assert controller.refs["output"].text == "等待采集输出…"
+        assert not client.outbox.updates
+        monkeypatch.setattr(controller, "refresh_status", refresh_status)
+        client.tab_id = "reconnected-tab"
+        await controller._resume()
+    assert resumed == [True]
+    assert controller.refs["output"].text == "new actual output"
+    assert client.connect_handlers
+
+
+@pytest.mark.asyncio
+async def test_configuration_refresh_updates_only_changed_field_and_keeps_expansion(native_workbench, monkeypatch):
+    from app.ui import runs
+    controller, client, records, _timers = native_workbench
+
+    async def observe(items):
+        return [{**record, "observed_at": "2026-10-03T12:34:56"} for record in items]
+
+    async def capture(_run):
+        pytest.fail("configuration view must not sample logs")
+
+    monkeypatch.setattr(runs, "observe_run_records", observe)
+    monkeypatch.setattr(controller, "_capture", capture)
+    with client:
+        controller.set_tab("config")
+        expansion = controller.refs["config_more"]
+        expansion.set_value(True)
+        ids = set(client.elements)
+        client.outbox.updates.clear()
+        await controller.refresh_status()
+    assert set(client.elements) == ids
+    assert controller.refs["config_more"] is expansion
+    assert expansion.value is True
+    changed = controller.refs["launch_fields"]["最近观测"]
+    assert changed.text == "2026-10-03 12:34:56"
+    assert set(client.outbox.updates) == {changed.id}
+
+
+@pytest.mark.parametrize("later_lines", [60, 300])
+@pytest.mark.asyncio
+async def test_full_output_cache_survives_later_short_request_but_not_newer_full_request(later_lines):
+    from app.ui import runs
+    guard, snapshot = runs.RunOutputRefreshGuard(), runs.RunOutputSnapshot()
+    first_started, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def capture(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            await release.wait()
+            return "first full output"
+        return "newer output"
+
+    first = asyncio.create_task(runs.capture_workbench_output(
+        _workbench_record(), snapshot, guard, capture=capture,
+        ssh_client_factory=object, lines=300,
+    ))
+    await first_started.wait()
+    second = asyncio.create_task(runs.capture_workbench_output(
+        _workbench_record(), snapshot, guard, capture=capture,
+        ssh_client_factory=object, lines=later_lines,
+    ))
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(first, second)
+    assert snapshot.value == "newer output"
+    assert snapshot.full_value == ("first full output" if later_lines == 60 else "newer output")
+
+
+@pytest.mark.asyncio
+async def test_status_batch_stops_starting_new_capture_after_disconnect(native_workbench, monkeypatch):
+    from app.ui import runs
+    controller, client, records, _timers = native_workbench
+    records.extend(_workbench_record(run_id) for run_id in range(3, 9))
+    captured = []
+
+    async def observe(items):
+        return items
+
+    async def capture(run):
+        captured.append(run["id"])
+        client.tab_id = None
+        client.outbox.updates.clear()
+
+    monkeypatch.setattr(runs, "observe_run_records", observe)
+    monkeypatch.setattr(controller, "_capture", capture)
+    with client:
+        await controller.refresh_status()
+    assert captured == [1]
+    assert not client.outbox.updates
+
+
+@pytest.mark.asyncio
+async def test_queued_capture_rechecks_connection_after_obtaining_lock():
+    from app.ui import runs
+    guard, snapshot = runs.RunOutputRefreshGuard(), runs.RunOutputSnapshot()
+    connected = True
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def capture(*_args, **kwargs):
+        calls.append(kwargs["lines"])
+        started.set()
+        await release.wait()
+        return "successful in-flight full output"
+
+    first = asyncio.create_task(runs.capture_workbench_output(
+        _workbench_record(), snapshot, guard, capture=capture, ssh_client_factory=object,
+        lines=300, can_capture=lambda: connected,
+    ))
+    await started.wait()
+    queued = asyncio.create_task(runs.capture_workbench_output(
+        _workbench_record(), snapshot, guard, capture=capture, ssh_client_factory=object,
+        lines=60, can_capture=lambda: connected,
+    ))
+    await asyncio.sleep(0)
+    connected = False
+    release.set()
+    await asyncio.gather(first, queued)
+    assert calls == [300]
+    assert snapshot.full_value == "successful in-flight full output"

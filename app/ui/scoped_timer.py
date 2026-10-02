@@ -20,6 +20,29 @@ def _looks_like_deleted_slot_error(exc: RuntimeError) -> bool:
     return "parent slot" in str(exc).lower() and "deleted" in str(exc).lower()
 
 
+def _polling_is_active(owner: Any) -> bool:
+    """Avoid sampling when no connected browser can see the owner's panel."""
+
+    client = getattr(owner, "client", None)
+    if client is not None:
+        if not getattr(client, "has_socket_connection", True):
+            return False
+        if not getattr(client, "st_page_visible", True):
+            return False
+    element = owner
+    while element is not None:
+        if _is_deleted(element) or not getattr(element, "visible", True):
+            return False
+        try:
+            slot = getattr(element, "parent_slot", None)
+        except RuntimeError as exc:
+            if _looks_like_deleted_slot_error(exc):
+                return False
+            raise
+        element = getattr(slot, "parent", None)
+    return True
+
+
 async def _call(callback: Callable[[], Any | Awaitable[Any]]) -> None:
     result = callback()
     if inspect.isawaitable(result):
@@ -69,7 +92,9 @@ def create_scoped_timer(
     NiceGUI's ``ui.timer`` can keep firing briefly after a page subtree has been
     removed during navigation, which raises noisy ``parent slot ... deleted``
     exceptions before user callbacks even run. This task-based timer is scoped to
-    a stable owner element and stops before touching deleted UI.
+    a stable owner element and stops before touching deleted UI. Periodic sampling
+    pauses while disconnected or hidden, then resumes without catching up missed
+    ticks. One-shot callbacks retain their action/initialization semantics.
     """
 
     async def runner() -> None:
@@ -77,7 +102,8 @@ def create_scoped_timer(
             await asyncio.sleep(max(interval, 0))
         while not _is_deleted(owner):
             try:
-                await _call_in_owner_context(owner, callback)
+                if once or _polling_is_active(owner):
+                    await _call_in_owner_context(owner, callback)
             except asyncio.CancelledError:
                 raise
             except RuntimeError as exc:

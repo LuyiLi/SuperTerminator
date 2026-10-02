@@ -23,8 +23,9 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8090
     reload: bool = False
-    refresh_seconds: int = 15
-    run_output_seconds: int = 3
+    refresh_seconds: int = 30
+    run_output_seconds: int = 10
+    reconnect_seconds: int = 300
     show_debug_terminal: bool = False
 
 
@@ -35,7 +36,8 @@ def load_settings() -> Settings:
         host=os.getenv("GPU_SSH_PANEL_HOST", "127.0.0.1"),
         port=int(os.getenv("GPU_SSH_PANEL_PORT", "8090")),
         reload=_bool_env("GPU_SSH_PANEL_RELOAD", False),
-        refresh_seconds=int(os.getenv("GPU_SSH_PANEL_REFRESH_SECONDS", "15")),
-        run_output_seconds=int(os.getenv("GPU_SSH_PANEL_RUN_OUTPUT_SECONDS", "3")),
+        refresh_seconds=int(os.getenv("GPU_SSH_PANEL_REFRESH_SECONDS", "30")),
+        run_output_seconds=int(os.getenv("GPU_SSH_PANEL_RUN_OUTPUT_SECONDS", "10")),
+        reconnect_seconds=max(60, int(os.getenv("GPU_SSH_PANEL_RECONNECT_SECONDS", "300"))),
         show_debug_terminal=_bool_env("GPU_SSH_PANEL_SHOW_DEBUG_TERMINAL", False),
     )

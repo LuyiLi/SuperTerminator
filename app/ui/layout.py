@@ -7,6 +7,7 @@ from nicegui import ui
 
 from app.db import engine, session_scope
 from app.models import Project
+from app.connection import install_connection_status
 
 
 NAV_ITEMS = [
@@ -314,13 +315,14 @@ def app_frame(title: str, content: Callable[[], None]) -> None:
     ui.add_css(SHELL_CSS)
     ui.add_css(Path(__file__).with_name("dashboard.css"))
     ui.add_css(Path(__file__).with_name("operations.css"))
+    install_connection_status()
 
     with ui.element("a").props("href=#st-main").classes("st-skip-link"):
         ui.label("跳转到内容")
 
     current_path = _current_path()
-    with ui.left_drawer(value=None).props(
-        "width=176 breakpoint=767 no-swipe-open no-swipe-close no-swipe-backdrop"
+    with ui.left_drawer(value=False).props(
+        "show-if-above width=176 breakpoint=767 no-swipe-open no-swipe-close no-swipe-backdrop"
     ).classes("st-sidebar") as drawer:
         with ui.column().classes("st-sidebar-inner"):
             ui.button(icon="close", on_click=drawer.hide, color=None).props(

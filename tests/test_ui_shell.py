@@ -179,17 +179,22 @@ def test_app_frame_sets_title_navigation_and_invokes_content(monkeypatch):
     fake_ui = FakeUI()
     monkeypatch.setattr(layout, "ui", fake_ui)
     monkeypatch.setattr(layout, "_sidebar_projects", lambda: [(42, "Alpha"), (7, "Beta")])
+    connection_installs = []
+    monkeypatch.setattr(layout, "install_connection_status", lambda: connection_installs.append(True))
     rendered = []
 
     layout.app_frame("Projects", lambda: rendered.append("content"))
 
     assert ("page_title", ("SuperTerminator",), {}) in fake_ui.calls
     assert ("label", ("SuperTerminator",), {}) in fake_ui.calls
-    assert ("left_drawer", (), {"value": None}) in fake_ui.calls
+    assert ("left_drawer", (), {"value": False}) in fake_ui.calls
     assert any(
-        call[0] == "props:left_drawer" and "no-swipe-open" in call[1][0] and "no-swipe-close" in call[1][0]
+        call[0] == "props:left_drawer" and "show-if-above" in call[1][0]
+        and "breakpoint=767" in call[1][0]
+        and "no-swipe-open" in call[1][0] and "no-swipe-close" in call[1][0]
         for call in fake_ui.calls
     )
+    assert connection_installs == [True]
     assert any(call[0] == "element" and call[1] == ("main",) for call in fake_ui.calls)
     assert any(call[0] == "props:element" and "id=st-main" in call[1][0] for call in fake_ui.calls)
     assert [call for call in fake_ui.calls if call[0] == "link"] == [
@@ -283,7 +288,9 @@ def test_main_initializes_database_and_runs_nicegui_with_settings(monkeypatch):
     import app.main as main_module
 
     called = []
-    monkeypatch.setattr(main_module, "settings", SimpleNamespace(host="0.0.0.0", port=9000, reload=True))
+    monkeypatch.setattr(main_module, "settings", SimpleNamespace(
+        host="0.0.0.0", port=9000, reload=True, reconnect_seconds=180,
+    ))
     monkeypatch.setattr(main_module, "init_db", lambda: called.append("init_db"))
     monkeypatch.setattr(
         main_module.ui,
@@ -295,7 +302,8 @@ def test_main_initializes_database_and_runs_nicegui_with_settings(monkeypatch):
 
     assert called == [
         "init_db",
-        ("run", {"host": "0.0.0.0", "port": 9000, "reload": True, "title": "gpu-ssh-panel"}),
+        ("run", {"host": "0.0.0.0", "port": 9000, "reload": True, "title": "gpu-ssh-panel",
+                 "reconnect_timeout": 180, "message_history_length": 2000}),
     ]
 
 
@@ -488,6 +496,88 @@ def test_dashboard_refresh_timers_share_the_resource_container(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_scoped_polling_pauses_for_connection_and_ancestor_visibility(monkeypatch):
+    from nicegui import Client, ui
+    from nicegui.page import page
+    from app.ui import scoped_timer
+
+    sleeps = asyncio.Queue()
+    ticks = asyncio.Queue()
+
+    async def controlled_sleep(_delay):
+        await sleeps.put(None)
+        await ticks.get()
+
+    monkeypatch.setattr(scoped_timer, "asyncio", SimpleNamespace(
+        sleep=controlled_sleep, get_running_loop=asyncio.get_running_loop,
+        CancelledError=asyncio.CancelledError,
+    ))
+    client = Client(page("/__test_scoped_polling"))
+    with client:
+        with ui.column() as panel:
+            owner = ui.column()
+    monkeypatch.setattr(client, "tab_id", None)
+    monkeypatch.setattr(client, "st_page_visible", True, raising=False)
+    calls = []
+
+    def collect():
+        assert ui.context.slot.parent is owner
+        calls.append("sample")
+
+    async def tick():
+        ticks.put_nowait(None)
+        await asyncio.wait_for(sleeps.get(), timeout=1)
+
+    task = scoped_timer.create_scoped_timer(owner, 10, collect, immediate=False)
+    try:
+        await asyncio.wait_for(sleeps.get(), timeout=1)
+        await tick()
+        assert calls == []  # Initial connection has not arrived.
+        client.tab_id = "connected"
+        panel.set_visibility(False)
+        await tick()
+        assert calls == []  # The owner itself is visible, but its view is hidden.
+        panel.set_visibility(True)
+        client.st_page_visible = False
+        await tick()
+        assert calls == []
+        client.st_page_visible = True
+        await tick()
+        assert calls == ["sample"]
+        client.tab_id = None
+        await tick()
+        await tick()
+        assert calls == ["sample"]
+        client.tab_id = "reconnected"
+        await tick()
+        assert calls == ["sample", "sample"]  # No catch-up burst.
+    finally:
+        client.delete()
+        await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_scoped_once_action_runs_even_when_view_is_hidden_or_disconnected(monkeypatch):
+    from nicegui import Client, ui
+    from nicegui.page import page
+    from app.ui.scoped_timer import create_scoped_timer
+
+    client = Client(page("/__test_scoped_once"))
+    with client:
+        owner = ui.column().set_visibility(False)
+    monkeypatch.setattr(owner.client, "tab_id", None)
+    monkeypatch.setattr(owner.client, "st_page_visible", False, raising=False)
+    calls = []
+    try:
+        task = create_scoped_timer(owner, 0, lambda: calls.append("action"), once=True)
+        await asyncio.wait_for(task, timeout=1)
+        assert calls == ["action"]
+    finally:
+        client.delete()
+
+
+@pytest.mark.asyncio
 async def test_dashboard_refresh_renders_immediate_snapshot_before_metrics_return(monkeypatch):
     from app.schemas import ServerStatus
     from app.ui import dashboard
@@ -532,6 +622,53 @@ async def test_dashboard_refresh_renders_immediate_snapshot_before_metrics_retur
     release_collect.set()
     await task
     assert calls[-1] == ("results", ("gpu01",), 1)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_only_rebuilds_when_full_snapshot_changes(monkeypatch):
+    from app.schemas import ServerStatus
+    from app.ui import dashboard
+
+    fake_ui = FakeUI()
+    aliases = ["gpu01"]
+    status = ServerStatus(alias="gpu01", online=True, cpu_percent=12,
+                          gpu=({"memory_used_mib": 1024},))
+
+    async def collect(_alias, _ssh_client):
+        return status
+
+    monkeypatch.setattr(dashboard, "ui", fake_ui)
+    monkeypatch.setattr(dashboard, "create_scoped_timer", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dashboard, "load_enabled_server_aliases", lambda: list(aliases))
+    monkeypatch.setattr(dashboard, "collect_server_status", collect)
+    dashboard.render_dashboard_page()
+    refresh = next(element.kwargs["on_click"] for element in fake_ui.elements
+                   if element.kind == "button" and "on_click" in element.kwargs)
+    await refresh()
+    clear_count = lambda: sum(call[0] == "clear:column" for call in fake_ui.calls)
+    assert clear_count() == 2  # Initial preview and first completed sample.
+    initial_element_count = len(fake_ui.elements)
+    initial_update_count = sum(call[0] == "set_text:label" for call in fake_ui.calls)
+    status = ServerStatus(alias="gpu01", online=True, cpu_percent=12,
+                          gpu=({"memory_used_mib": 1024},))
+    await refresh()
+    assert clear_count() == 2
+    assert len(fake_ui.elements) == initial_element_count
+    assert sum(call[0] == "set_text:label" for call in fake_ui.calls) == initial_update_count
+    status = ServerStatus(alias="gpu01", online=True, cpu_percent=12,
+                          gpu=({"memory_used_mib": 2048},))
+    await refresh()
+    assert clear_count() == 3  # Exact GPU readings also invalidate the snapshot.
+    status = ServerStatus(alias="gpu01", online=False, error="network timeout")
+    await refresh()
+    assert clear_count() == 4
+    await refresh()
+    assert clear_count() == 4
+    aliases.clear()
+    await refresh()
+    assert clear_count() == 5
+    await refresh()
+    assert clear_count() == 5
 
 
 @pytest.mark.asyncio
@@ -874,6 +1011,7 @@ def test_layout_sidebar_has_brand_icons_and_active_state(monkeypatch):
 
     fake_ui = FakeUI()
     monkeypatch.setattr(layout, "ui", fake_ui)
+    monkeypatch.setattr(layout, "install_connection_status", lambda: None)
     monkeypatch.setattr(layout, "_current_path", lambda: "/projects/42")
     monkeypatch.setattr(layout, "_sidebar_projects", lambda: [(42, "Alpha")])
 

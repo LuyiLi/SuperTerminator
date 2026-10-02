@@ -603,28 +603,50 @@ def render_dashboard_page() -> None:
     """Render the home dashboard with periodically refreshed server status."""
 
     refresh_guard = DashboardRefreshGuard()
+    has_snapshot = False
+    displayed_snapshot: tuple[tuple[str, ...], tuple[ServerStatus, ...]] | None = None
+    summary_text = "正在加载机器"
+
+    def set_summary(text: str) -> None:
+        nonlocal summary_text
+        if text != summary_text:
+            fleet_summary.set_text(text)
+            summary_text = text
 
     async def refresh() -> None:
+        nonlocal has_snapshot, displayed_snapshot
         generation = refresh_guard.next_generation()
         aliases = load_enabled_server_aliases()
         if not aliases:
             if refresh_guard.is_current(generation):
-                render_empty_state(container)
-                fleet_summary.set_text("0 台机器")
+                if displayed_snapshot != ((), ()):
+                    render_empty_state(container)
+                    displayed_snapshot = ((), ())
+                has_snapshot = True
+                set_summary("0 台机器")
             return
 
-        if refresh_guard.is_current(generation):
+        if not has_snapshot and refresh_guard.is_current(generation):
             _render_immediate_statuses(container, aliases)
-            fleet_summary.set_text(f"{len(aliases)} 台机器 · 正在刷新")
+            has_snapshot = True
+            set_summary(f"{len(aliases)} 台机器 · 正在刷新")
 
         results = await asyncio.gather(
             *(collect_server_status(alias, SSHClient()) for alias in aliases),
             return_exceptions=True,
         )
         if refresh_guard.is_current(generation):
-            render_results(container, aliases, results)
-            online = sum(isinstance(result, ServerStatus) and result.online for result in results)
-            fleet_summary.set_text(
+            statuses = tuple(
+                ServerStatus(alias=alias, online=False, error=str(result))
+                if isinstance(result, BaseException) else result
+                for alias, result in zip(aliases, results, strict=True)
+            )
+            snapshot = (tuple(aliases), statuses)
+            if snapshot != displayed_snapshot:
+                render_results(container, aliases, list(statuses))
+                displayed_snapshot = snapshot
+            online = sum(status.online for status in statuses)
+            set_summary(
                 f"{len(aliases)} 台机器 · {online} 在线 · {len(aliases) - online} 离线"
             )
 

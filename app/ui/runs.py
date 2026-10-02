@@ -28,7 +28,7 @@ from app.run_status import (
 )
 from app.ssh_client import SSHClient
 from app.visual_actions import capture_run_output, stop_run
-from app.ui.scoped_timer import create_scoped_timer
+from app.ui.scoped_timer import create_scoped_timer, _polling_is_active
 from app.ui.sync_launch import render_sync_summary
 
 
@@ -41,13 +41,19 @@ class RunOutputRefreshGuard:
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
         self._generation = 0
+        self._full_generation = 0
 
-    def next_generation(self) -> int:
+    def next_generation(self, *, full: bool = False) -> int:
         self._generation += 1
+        if full:
+            self._full_generation = self._generation
         return self._generation
 
     def is_current(self, generation: int) -> bool:
         return generation == self._generation
+
+    def is_current_full(self, generation: int) -> bool:
+        return generation == self._full_generation
 
 
 def _notify(message: str, *, type: str = "info") -> None:
@@ -216,6 +222,16 @@ async def stop_run_session(
 ACTIVE_RUN_STATES = frozenset({"created", "preparing", "starting", "running"})
 UNCERTAIN_RUN_STATES = frozenset({"unknown", "lost"})
 RUN_FILTERS = (("active", "运行中"), ("attention", "待处理"), ("finished", "已结束"), ("all", "全部"))
+SUMMARY_CAPTURE_LINES = 60
+FULL_CAPTURE_LINES = 300
+PREVIEW_VISIBLE_LINES = 6
+PREVIEW_MAX_BYTES = 4 * 1024
+FULL_OUTPUT_MAX_BYTES = 24 * 1024
+
+
+def bounded_output_tail(output: str, *, lines: int, max_bytes: int) -> str:
+    tail = "\n".join(output.splitlines()[-lines:])
+    return tail.encode("utf-8")[-max_bytes:].decode("utf-8", errors="ignore")
 
 
 def run_state_view(run: dict[str, Any]) -> tuple[str, str, str]:
@@ -277,11 +293,19 @@ class RunOutputSnapshot:
     error: str = ""
     collected_at: str | None = None
     progress: dict[str, Any] = field(default_factory=dict)
+    full_value: str | None = None
+    full_collected_at: str | None = None
 
-    def accept(self, output: str) -> None:
+    def accept_full(self, output: str) -> None:
+        self.full_value = output
+        self.full_collected_at = datetime.now().strftime("%H:%M:%S")
+
+    def accept(self, output: str, *, lines: int = FULL_CAPTURE_LINES) -> None:
         self.value = output
         self.error = ""
         self.collected_at = datetime.now().strftime("%H:%M:%S")
+        if lines >= FULL_CAPTURE_LINES:
+            self.accept_full(output)
         # A short tail may no longer contain the last progress line. Keep that evidence.
         parsed = parse_training_progress(output)
         if "iteration" in parsed or "epoch" in parsed:
@@ -381,33 +405,44 @@ async def capture_workbench_output(
     run: dict[str, Any], snapshot: RunOutputSnapshot, guard: RunOutputRefreshGuard,
     *, capture: Callable[..., Awaitable[str]] | None = None,
     ssh_client_factory: Callable[[], Any] = _CheckedOutputSSHClient,
+    lines: int = FULL_CAPTURE_LINES,
+    can_capture: Callable[[], bool] | None = None,
 ) -> None:
-    generation = guard.next_generation()
+    if can_capture is not None and not can_capture():
+        return
+    generation = guard.next_generation(full=lines >= FULL_CAPTURE_LINES)
     async with guard.lock:
+        if can_capture is not None and not can_capture():
+            return
         try:
             output = await (capture or capture_run_output)(
                 run["server_alias"], run["tmux_session"], ssh_client_factory(),
-                lines=300, engine=engine, run_id=run["id"],
+                lines=lines, engine=engine, run_id=run["id"],
             )
         except Exception as exc:
             if guard.is_current(generation):
                 snapshot.error = str(exc)
             return
         if guard.is_current(generation):
-            snapshot.accept(output)
+            snapshot.accept(output, lines=lines)
+        elif lines >= FULL_CAPTURE_LINES and guard.is_current_full(generation):
+            # A newer short preview must not invalidate a requested full output cache.
+            snapshot.accept_full(output)
 
 
 def _set_text(target: Any, text: str) -> None:
     target.set_text(text)
 
 
-def _run_key_values(items: list[tuple[str, Any]]) -> None:
+def _run_key_values(items: list[tuple[str, Any]]) -> dict[str, Any]:
+    labels = {}
     with ui.element("dl").classes("st-run-kv"):
         for label, value in items:
             with ui.element("dt"):
                 ui.label(label)
             with ui.element("dd"):
-                ui.label(str(value) if value is not None and value != "" else "未记录")
+                labels[label] = ui.label(str(value) if value is not None and value != "" else "未记录")
+    return labels
 
 
 def _run_dialog(title: str):
@@ -445,6 +480,8 @@ class RunWorkbench:
         self.name_expanded = False
         self.config_expanded = False
         self.list_signature = None
+        self.list_refs: dict[int, dict[str, Any]] = {}
+        self.filter_refs: dict[str, dict[str, Any]] = {}
         self.status_error = ""
         self.selection_error = ""
         self._status_busy = False
@@ -481,6 +518,21 @@ class RunWorkbench:
     def _alive(self) -> bool:
         return not self.root.is_deleted
 
+    def _can_poll(self) -> bool:
+        return self._alive() and _polling_is_active(self.root)
+
+    def _can_sample_output(self) -> bool:
+        return self._can_poll() and self.state.detail_tab != "config"
+
+    async def _resume(self) -> None:
+        if not self._can_poll():
+            return
+        with self.root:
+            self.render_filters()
+            self.render_list()
+            self.update_inspector()
+        await self.refresh_status()
+
     def _render(self) -> None:
         ui.add_css(Path(__file__).with_name("runs.css"))
         with ui.column().classes("st-run-workspace") as self.root:
@@ -512,20 +564,27 @@ class RunWorkbench:
         self.render_filters()
         self.render_list()
         self.render_inspector()
+        self.root.client.on_connect(self._resume)
         create_scoped_timer(self.root, settings.refresh_seconds, self.refresh_status, immediate=False)
         create_scoped_timer(self.root, settings.run_output_seconds, self.refresh_selected_output, immediate=False)
         create_scoped_timer(self.root, 0.1, self.refresh_status, once=True)
 
     def render_filters(self) -> None:
-        self.filter_bar.clear()
-        with self.filter_bar:
-            for key, title in RUN_FILTERS:
-                active = key == self.state.filter_key
-                with ui.element("button").classes("st-run-filter" + (" is-active" if active else "")).props(
-                    f'type=button aria-pressed={str(active).lower()}'
-                ).on("click", lambda key=key: self.set_filter(key)):
-                    ui.label(title)
-                    ui.label(str(len(self.state.filtered(key)))).classes("st-run-filter-count")
+        if not self.filter_refs:
+            with self.filter_bar:
+                for key, title in RUN_FILTERS:
+                    with ui.element("button").props("type=button").on(
+                        "click", lambda key=key: self.set_filter(key)
+                    ) as button:
+                        ui.label(title)
+                        count = ui.label("").classes("st-run-filter-count")
+                    self.filter_refs[key] = {"button": button, "count": count}
+        for key, _title in RUN_FILTERS:
+            active = key == self.state.filter_key
+            refs = self.filter_refs[key]
+            refs["button"].classes(replace="st-run-filter" + (" is-active" if active else ""))
+            refs["button"].props(f"aria-pressed={str(active).lower()}")
+            refs["count"].set_text(str(len(self.state.filtered(key))))
 
     def set_filter(self, key: str) -> None:
         self.state.filter_key = key
@@ -562,6 +621,8 @@ class RunWorkbench:
     def set_tab(self, tab: str) -> None:
         self.state.detail_tab = tab
         self.render_inspector()
+        if tab != "config":
+            self._schedule_selected_output()
 
     def render_list(self) -> None:
         matching = self.state.filtered()
@@ -569,54 +630,75 @@ class RunWorkbench:
         selected = self.state.selected()
         if selected and selected in matching and selected not in visible:
             visible.insert(0, selected)
-        signature = (
-            self.state.selected_id, len(matching), len(self.state.records), self.display_limit,
-            tuple((run["id"], run.get("name"), run.get("training_run_name"),
-                   run.get("project_name"), run.get("server_alias"), run_gpu_label(run),
-                   run.get("exit_code"), run_state_view(run)[:2],
-                   progress_summary(self.state.outputs.get(run["id"], RunOutputSnapshot()).progress))
-                  for run in visible),
-        )
-        if signature == self.list_signature:
-            return
-        self.list_signature = signature
-        self.list_container.clear()
-        with self.list_container:
-            if not visible:
-                ui.label("当前筛选下没有任务").classes("st-empty")
-            for run in visible:
-                run_id = run["id"]
-                label, tone, _ = run_state_view(run)
-                selected = run_id == self.state.selected_id
-                full_name = str(run.get("training_run_name") or run.get("name") or f"Run {run_id}")
-                with ui.element("button").classes("st-run-item" + (" is-selected" if selected else "")).props(
-                    f'type=button aria-pressed={str(selected).lower()} '
-                    f'aria-label={json.dumps(f"选择任务 #{run_id} {full_name}", ensure_ascii=False)}'
-                ).on("click", lambda run_id=run_id: self.select(run_id)):
-                    with ui.row().classes("st-run-item-title"):
-                        ui.label(str(run.get("name") or full_name)).tooltip(full_name)
-                        ui.icon("chevron_right")
-                    with ui.row().classes("st-run-item-meta"):
-                        ui.label(f"#{run_id}")
-                        ui.label(label).classes(f"st-run-state st-state-{tone}")
-                        if self.project_id is None:
-                            ui.label(str(run.get("project_name") or "")).classes("st-run-project-name")
-                    with ui.row().classes("st-run-item-tail"):
-                        ui.label(str(run.get("server_alias") or ""))
-                        ui.label(f"GPU {run_gpu_label(run)}")
-                    snapshot = self.state.outputs.get(run_id, RunOutputSnapshot())
-                    percent = snapshot.progress.get("percent")
-                    if isinstance(percent, (int, float)):
-                        ui.linear_progress(max(0, min(percent / 100, 1)), show_value=False, color=None).classes(
-                            f"st-run-meter st-state-{tone}"
-                        )
-                    with ui.row().classes("st-run-item-tail"):
-                        ui.label(progress_summary(snapshot.progress))
-                        if run.get("exit_code") is not None:
-                            ui.label(f"exit {run['exit_code']}")
-            if len(matching) > len(visible):
-                ui.button("再显示 50 条", on_click=self.show_more).props("flat no-caps")
+        signature = (tuple(run["id"] for run in visible), len(matching) > len(visible))
+        if signature != self.list_signature:
+            self.list_signature = signature
+            self.list_container.clear()
+            self.list_refs = {}
+            with self.list_container:
+                if not visible:
+                    ui.label("当前筛选下没有任务").classes("st-empty")
+                for run in visible:
+                    self._create_list_item(run)
+                if len(matching) > len(visible):
+                    ui.button("再显示 50 条", on_click=self.show_more).props("flat no-caps")
+        for run in visible:
+            self._update_list_item(run)
         self.list_footer.set_text(f"显示 {len(visible)} / {len(matching)} 个匹配任务 · 已加载 {len(self.state.records)} 条")
+
+    def _create_list_item(self, run: dict[str, Any]) -> None:
+        run_id = run["id"]
+        refs = self.list_refs[run_id] = {}
+        with ui.element("button").props("type=button").on(
+            "click", lambda run_id=run_id: self.select(run_id)
+        ) as button:
+            refs["button"] = button
+            with ui.row().classes("st-run-item-title"):
+                with ui.label("") as title:
+                    refs["tooltip"] = ui.tooltip("")
+                refs["title"] = title
+                ui.icon("chevron_right")
+            with ui.row().classes("st-run-item-meta"):
+                ui.label(f"#{run_id}")
+                refs["state"] = ui.label("")
+                if self.project_id is None:
+                    refs["project"] = ui.label("").classes("st-run-project-name")
+            with ui.row().classes("st-run-item-tail"):
+                refs["server"] = ui.label("")
+                refs["gpus"] = ui.label("")
+            refs["meter"] = ui.linear_progress(0, show_value=False, color=None)
+            with ui.row().classes("st-run-item-tail"):
+                refs["progress"] = ui.label("")
+                refs["exit"] = ui.label("")
+
+    def _update_list_item(self, run: dict[str, Any]) -> None:
+        run_id = run["id"]
+        refs = self.list_refs[run_id]
+        label, tone, _ = run_state_view(run)
+        selected = run_id == self.state.selected_id
+        full_name = str(run.get("training_run_name") or run.get("name") or f"Run {run_id}")
+        refs["button"].classes(replace="st-run-item" + (" is-selected" if selected else ""))
+        refs["button"].props(
+            f'aria-pressed={str(selected).lower()} '
+            f'aria-label={json.dumps(f"选择任务 #{run_id} {full_name}", ensure_ascii=False)}'
+        )
+        refs["title"].set_text(str(run.get("name") or full_name))
+        refs["tooltip"].set_text(full_name)
+        refs["state"].set_text(label)
+        refs["state"].classes(replace=f"st-run-state st-state-{tone}")
+        if "project" in refs:
+            refs["project"].set_text(str(run.get("project_name") or ""))
+        refs["server"].set_text(str(run.get("server_alias") or ""))
+        refs["gpus"].set_text(f"GPU {run_gpu_label(run)}")
+        snapshot = self.state.outputs.get(run_id, RunOutputSnapshot())
+        percent = snapshot.progress.get("percent")
+        known = isinstance(percent, (int, float))
+        refs["meter"].classes(replace=f"st-run-meter st-state-{tone}" + (" hidden" if not known else ""))
+        refs["meter"].set_visibility(known)
+        refs["meter"].set_value(max(0, min(percent / 100, 1)) if known else 0)
+        refs["progress"].set_text(progress_summary(snapshot.progress))
+        refs["exit"].set_text(f"exit {run['exit_code']}" if run.get("exit_code") is not None else "")
+        refs["exit"].set_visibility(run.get("exit_code") is not None)
 
     def show_more(self) -> None:
         self.display_limit += 50
@@ -680,7 +762,7 @@ class RunWorkbench:
                         "st-run-log" + (" st-run-log-full" if self.state.detail_tab == "logs" else "")
                     ).props('role=log aria-label="训练输出"')
                     if self.state.detail_tab == "logs":
-                        ui.label("最近 300 行 · 采集失败时保留最后一次成功输出").classes("st-run-footnote")
+                        ui.label("最近至多 300 行 / 24 KiB · 采集失败时保留最后一次成功输出").classes("st-run-footnote")
                     if settings.show_debug_terminal:
                         ui.label("Debug terminal placeholder: interactive terminal will appear here.").classes("st-run-footnote")
             with ui.element("footer").classes("st-run-inspector-footer"):
@@ -690,10 +772,10 @@ class RunWorkbench:
                 self.refs["stop"] = ui.button("停止…", color=None, on_click=self.confirm_stop).props("flat no-caps").classes("st-run-stop")
             self.update_inspector()
 
-    def render_launch_info(self, run: dict[str, Any]) -> None:
+    def _launch_fields(self, run: dict[str, Any]) -> list[tuple[str, Any]]:
         config, metadata = run.get("config") or {}, run.get("sync_metadata") or {}
         parameters = metadata.get("parameters") or config
-        _run_key_values([
+        return [
             ("完整实验名", run.get("training_run_name") or run.get("name")),
             ("启动来源", launch_provenance_label(run)),
             ("GPU 预检", launch_preflight_label(run)),
@@ -709,23 +791,43 @@ class RunWorkbench:
             ("启动时间", format_run_time(run.get("started_at"))),
             ("结束时间", format_run_time(run.get("ended_at"))),
             ("最近观测", format_run_time(run.get("observed_at") or run.get("last_observed_at"))),
-        ])
-        wandb_url = metadata.get("wandb_url")
-        if isinstance(wandb_url, str) and wandb_url.startswith(("https://", "http://")):
-            ui.link("打开 W&B", wandb_url, new_tab=True).classes("st-run-wandb")
-        else:
-            ui.label("W&B：尚未取得真实 run URL").classes("st-run-footnote")
+        ]
+
+    @staticmethod
+    def _launch_metadata_fields(run: dict[str, Any]) -> list[tuple[str, Any]]:
+        metadata = run.get("sync_metadata") or {}
+        return [
+            ("请求 ID", run.get("request_key")), ("启动阶段", run.get("sync_stage")),
+            ("快照指纹", metadata.get("fingerprint")),
+            ("远端快照", metadata.get("remote_workdir")),
+            ("日志路径", metadata.get("log_path")),
+            ("状态详情", run.get("status_detail")),
+        ]
+
+    def render_launch_info(self, run: dict[str, Any]) -> None:
+        self.refs["launch_fields"] = _run_key_values(self._launch_fields(run))
+        self.refs["wandb"] = ui.link("打开 W&B", "#", new_tab=True).classes("st-run-wandb")
+        self.refs["wandb_unknown"] = ui.label("W&B：尚未取得真实 run URL").classes("st-run-footnote")
         with ui.expansion("完整命令、请求与快照", value=self.config_expanded).classes("st-run-config-more") as config_expansion:
             self.refs["config_more"] = config_expansion
-            ui.label(str(run.get("rendered_command") or "未记录")).classes("st-run-log st-run-command")
-            _run_key_values([
-                ("请求 ID", run.get("request_key")), ("启动阶段", run.get("sync_stage")),
-                ("快照指纹", metadata.get("fingerprint")),
-                ("远端快照", metadata.get("remote_workdir")),
-                ("日志路径", metadata.get("log_path")),
-                ("状态详情", run.get("status_detail")),
-            ])
-            ui.label(json.dumps({"config": config, "sync_metadata": metadata}, ensure_ascii=False, indent=2)).classes("st-run-log st-run-command")
+            self.refs["command"] = ui.label("").classes("st-run-log st-run-command")
+            self.refs["launch_metadata"] = _run_key_values(self._launch_metadata_fields(run))
+            self.refs["launch_json"] = ui.label("").classes("st-run-log st-run-command")
+        self._update_launch_info(run)
+
+    def _update_launch_info(self, run: dict[str, Any]) -> None:
+        config, metadata = run.get("config") or {}, run.get("sync_metadata") or {}
+        for key, fields in (("launch_fields", self._launch_fields(run)),
+                            ("launch_metadata", self._launch_metadata_fields(run))):
+            for label, value in fields:
+                self.refs[key][label].set_text(str(value) if value is not None and value != "" else "未记录")
+        wandb_url = metadata.get("wandb_url")
+        has_wandb = isinstance(wandb_url, str) and wandb_url.startswith(("https://", "http://"))
+        self.refs["wandb"].props(f"href={json.dumps(wandb_url if has_wandb else '#')}")
+        self.refs["wandb"].set_visibility(has_wandb)
+        self.refs["wandb_unknown"].set_visibility(not has_wandb)
+        self.refs["command"].set_text(str(run.get("rendered_command") or "未记录"))
+        self.refs["launch_json"].set_text(json.dumps({"config": config, "sync_metadata": metadata}, ensure_ascii=False, indent=2))
 
     def update_inspector(self) -> None:
         run = self.state.selected()
@@ -737,6 +839,7 @@ class RunWorkbench:
         self.refs["selected_outside_filter"].set_visibility(not any(item["id"] == run["id"] for item in self.state.filtered()))
         self.refs["stop"].set_visibility(str(run.get("state") or run.get("status")) in (ACTIVE_RUN_STATES | {"unknown", "lost"}))
         if self.state.detail_tab == "config":
+            self._update_launch_info(run)
             return
         snapshot = self.state.outputs.get(run["id"], RunOutputSnapshot())
         if "outcome" in self.refs:
@@ -757,35 +860,42 @@ class RunWorkbench:
                 if progress.get(key) is not None:
                     extras.append(f"{title} {progress[key]}")
             self.refs["progress_extra"].set_text(" · ".join(extras))
-        self.refs["collected_at"].set_text(f"最后成功采集 {snapshot.collected_at}" if snapshot.collected_at else "尚未成功采集输出")
+        output, collected_at = snapshot.value, snapshot.collected_at
+        if self.state.detail_tab == "logs":
+            if snapshot.full_value is not None:
+                output, collected_at = snapshot.full_value, snapshot.full_collected_at
+            output = bounded_output_tail(output, lines=FULL_CAPTURE_LINES, max_bytes=FULL_OUTPUT_MAX_BYTES)
+        else:
+            output = bounded_output_tail(output, lines=PREVIEW_VISIBLE_LINES, max_bytes=PREVIEW_MAX_BYTES)
+        self.refs["collected_at"].set_text(f"最后成功采集 {collected_at}" if collected_at else "尚未成功采集输出")
         self.refs["output_error"].set_text("采集未成功，保留最后可用输出。" + snapshot.error if snapshot.error else "")
         self.refs["output_error"].set_visibility(bool(snapshot.error))
-        output = snapshot.value
-        if self.state.detail_tab == "overview":
-            output = "\n".join(output.splitlines()[-6:])
-        self.refs["output"].set_text(output or ("输出为空。" if snapshot.collected_at else "等待采集输出…"))
+        self.refs["output"].set_text(output or ("输出为空。" if collected_at else "等待采集输出…"))
 
     async def _capture(self, run: dict[str, Any]) -> None:
+        if not self._can_sample_output():
+            return
         run_id = run["id"]
         snapshot = self.state.outputs.setdefault(run_id, RunOutputSnapshot())
         guard = self.guards.setdefault(run_id, RunOutputRefreshGuard())
-        await capture_workbench_output(run, snapshot, guard)
+        lines = FULL_CAPTURE_LINES if run_id == self.state.selected_id and self.state.detail_tab == "logs" else SUMMARY_CAPTURE_LINES
+        await capture_workbench_output(run, snapshot, guard, lines=lines, can_capture=self._can_sample_output)
 
     async def refresh_selected_output(self) -> None:
         run = self.state.selected()
-        if not run or not self._alive() or run["id"] in self._output_busy:
+        if not run or not self._can_sample_output() or run["id"] in self._output_busy:
             return
         self._output_busy.add(run["id"])
         try:
             await self._capture(run)
-            if self._alive():
+            if self._can_poll():
                 self.update_inspector()
                 self.render_list()
         finally:
             self._output_busy.discard(run["id"])
 
     async def refresh_status(self) -> None:
-        if not self._alive() or self._status_busy:
+        if not self._can_poll() or self._status_busy:
             return
         self._status_busy = True
         self.status_generation += 1
@@ -803,15 +913,19 @@ class RunWorkbench:
             if not self._alive() or generation != self.status_generation:
                 return
             self.state.replace_records(observed)
+            if not self._can_poll():
+                return
             self.status_error = self.selection_error
             self.status_notice.set_text(self.status_error)
             self.status_notice.set_visibility(bool(self.status_error))
             self.render_filters()
             self.render_list()
-            if self.state.selected() and (not self.refs or self.state.detail_tab == "config"):
+            if self.state.selected() and not self.refs:
                 self.render_inspector()
             else:
                 self.update_inspector()
+            if not self._can_sample_output():
+                return
             # Keep traffic bounded: the selected task and up to twelve visible active tasks.
             targets = [run for run in self.state.filtered() if str(run.get("state") or run.get("status")) in ACTIVE_RUN_STATES][:12]
             selected = self.state.selected()
@@ -820,13 +934,14 @@ class RunWorkbench:
             semaphore = asyncio.Semaphore(4)
             async def sample(run):
                 async with semaphore:
-                    await self._capture(run)
+                    if self._can_sample_output():
+                        await self._capture(run)
             await asyncio.gather(*(sample(run) for run in targets))
-            if self._alive():
+            if self._can_poll():
                 self.render_list()
                 self.update_inspector()
         except Exception as exc:
-            if self._alive():
+            if self._can_poll():
                 self.status_error = str(exc)
                 self.status_notice.set_text("状态核实未完成；已保留当前任务和输出。" + self.status_error)
                 self.status_notice.set_visibility(True)

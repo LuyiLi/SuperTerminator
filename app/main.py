@@ -3,6 +3,7 @@ from __future__ import annotations
 from nicegui import app as nicegui_app, ui
 
 from app.config import load_settings
+from app.connection import configure_connection
 from app.db import init_db
 from app.ui.dashboard import render_dashboard_page
 from app.ui.projects import render_project_detail, render_projects_page
@@ -14,10 +15,7 @@ from app.ui.settings import render_settings_page
 
 settings = load_settings()
 
-# Prefer HTTP long-polling for NiceGUI events. Some local/browser proxy setups
-# show pages over a Tailscale IP but silently break WebSocket upgrades, which
-# makes buttons appear dead because click events never reach the server.
-nicegui_app.config.socket_io_js_transports = ["polling"]
+configure_connection(nicegui_app)
 
 
 @ui.page("/")
@@ -57,7 +55,8 @@ def settings_page() -> None:
 
 def main() -> None:
     init_db()
-    ui.run(host=settings.host, port=settings.port, reload=settings.reload, title="gpu-ssh-panel")
+    ui.run(host=settings.host, port=settings.port, reload=settings.reload, title="gpu-ssh-panel",
+           reconnect_timeout=settings.reconnect_seconds, message_history_length=2000)
 
 
 if __name__ in {"__main__", "__mp_main__"}:

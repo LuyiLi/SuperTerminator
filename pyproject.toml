@@ -40,4 +40,4 @@ py-modules = ["sitecustomize"]
 include = ["app*"]
 
 [tool.setuptools.package-data]
-"app.ui" = ["*.css"]
+"app.ui" = ["*.css", "*.js"]
